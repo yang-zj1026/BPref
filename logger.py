@@ -44,6 +44,10 @@ AGENT_TRAIN_FORMAT = {
     ],
 }
 
+IMAGE_REWARD_FORMAT = [
+    ('img_reward_loss', "IRLOSS", 'float'),
+]
+
 
 class AverageMeter(object):
     def __init__(self):
@@ -146,7 +150,7 @@ class Logger(object):
             self._sw = None
         # each agent has specific output format for training
         assert agent in AGENT_TRAIN_FORMAT
-        train_format = COMMON_TRAIN_FORMAT + AGENT_TRAIN_FORMAT[agent]
+        train_format = COMMON_TRAIN_FORMAT + AGENT_TRAIN_FORMAT[agent] + IMAGE_REWARD_FORMAT
         self._train_mg = MetersGroup(os.path.join(log_dir, 'train'),
                                      formating=train_format)
         self._eval_mg = MetersGroup(os.path.join(log_dir, 'eval'),
