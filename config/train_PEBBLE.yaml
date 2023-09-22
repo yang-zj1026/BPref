@@ -1,17 +1,24 @@
 defaults:
-    - agent: sac
+    - agent: sac_rad
     
 # this needs to be specified manually
 experiment: PEBBLE
 
+# Environment
+pre_transform_image_size: 100
+image_size: 84
+action_repeat: 2
+frame_stack: 3
+batch_size: 256
+
 # reward learning
-segment: 50
+segment: 10
 activation: tanh
 num_seed_steps: 1000
 num_unsup_steps: 500
 num_interact: 5000
 reward_lr: 0.0003
-reward_batch: 128
+reward_batch: 16
 reward_update: 200
 feed_type: 0
 reset_update: 100
@@ -30,7 +37,7 @@ teacher_eps_equal: 0
 reward_schedule: 0
 
 num_train_steps: 1e6
-replay_buffer_capacity: 100000
+replay_buffer_capacity: 10000
 
 # evaluation config
 eval_frequency: 10000

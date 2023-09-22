@@ -13,7 +13,9 @@ import time
 
 from scipy.stats import norm
 
+import utils
 from encoder import make_encoder
+import data_augs as rad
 
 device = 'cuda'
 
@@ -89,18 +91,20 @@ def compute_smallest_dist(obs, full_obs):
 
 
 class RewardModel:
-    def __init__(self, ds, da,
+    def __init__(self, ds, da, obs_shape, pre_image_size, image_size, data_augs,
                  ensemble_size=3, lr=3e-4, mb_size=128, size_segment=1,
                  env_maker=None, max_size=100, activation='tanh', capacity=5e5,
                  large_batch=1, label_margin=0.0,
                  teacher_beta=-1, teacher_gamma=1,
                  teacher_eps_mistake=0,
                  teacher_eps_skip=0,
-                 teacher_eps_equal=0):
+                 teacher_eps_equal=0,
+                 ):
 
         # train data is trajectories, must process to sa and s..   
         self.ds = ds
         self.da = da
+        self.obs_shape = obs_shape
         self.de = ensemble_size
         self.lr = lr
         self.ensemble = []
@@ -112,13 +116,16 @@ class RewardModel:
         self.size_segment = size_segment
 
         self.capacity = int(capacity)
-        self.buffer_seg1 = np.empty((self.capacity, size_segment, self.ds + self.da), dtype=np.float32)
-        self.buffer_seg2 = np.empty((self.capacity, size_segment, self.ds + self.da), dtype=np.float32)
+
+        obs_type = np.float32 if len(obs_shape) == 1 else np.uint8
+        self.buffer_seg1 = np.empty((self.capacity, size_segment, *obs_shape), dtype=obs_type)
+        self.buffer_seg2 = np.empty((self.capacity, size_segment, *obs_shape), dtype=obs_type)
         self.buffer_label = np.empty((self.capacity, 1), dtype=np.float32)
         self.buffer_index = 0
         self.buffer_full = False
 
-        self.construct_ensemble()
+        # self.construct_ensemble()
+        self.construct_image_model()
         self.inputs = []
         self.targets = []
         self.raw_actions = []
@@ -146,6 +153,59 @@ class RewardModel:
         self.label_margin = label_margin
         self.label_target = 1 - 2 * self.label_margin
 
+        self.pre_image_size = pre_image_size
+        self.image_size = image_size
+        self.data_augs = data_augs
+        self.augs_funcs = {}
+        aug_to_func = {
+            'crop': rad.random_crop,
+            'grayscale': rad.random_grayscale,
+            'cutout': rad.random_cutout,
+            'cutout_color': rad.random_cutout_color,
+            'flip': rad.random_flip,
+            'rotate': rad.random_rotation,
+            'rand_conv': rad.random_convolution,
+            'color_jitter': rad.random_color_jitter,
+            'translate': rad.random_translate,
+            'no_aug': rad.no_aug,
+        }
+
+        for aug_name in self.data_augs.split('-'):
+            assert aug_name in aug_to_func, 'invalid data aug string'
+            self.augs_funcs[aug_name] = aug_to_func[aug_name]
+
+    def construct_image_model(self):
+        # hardcode for now
+        dim_hidden = '256_256'.split("_")
+        dim_hidden = [int(x) for x in dim_hidden]
+        encoder_feature_dim = 50
+        self.encoder = make_encoder(
+            encoder_type='pixel',
+            obs_shape=self.obs_shape,
+            feature_dim=encoder_feature_dim,
+            num_layers=4,
+            num_filters=32,
+            output_logits=True,
+            add_norm='batch_norm',
+        )
+        self.regression_layers = nn.Sequential()
+        ## init hidden layers
+        for i in range(len(dim_hidden)):
+            if i == 0:
+                self.regression_layers.add_module("linear_{}".format(i), nn.Linear(encoder_feature_dim, dim_hidden[i]))
+            else:
+                self.regression_layers.add_module("linear_{}".format(i),
+                                                  nn.Linear(dim_hidden[i - 1], dim_hidden[i]))
+            self.regression_layers.add_module("relu_{}".format(i), nn.ReLU())
+        ## init output layer
+        self.regression_layers.add_module("linear_{}".format(len(dim_hidden)), nn.Linear(dim_hidden[-1], 1))
+
+        self.model = nn.Sequential(self.encoder, self.regression_layers).to(device)
+
+        paramlst = list(self.encoder.parameters()) + list(self.regression_layers.parameters())
+        self.encoder_optimizer = torch.optim.Adam(self.encoder.parameters(), lr=self.lr)
+        self.regression_optimizer = torch.optim.Adam(self.regression_layers.parameters(), lr=self.lr)
+
     def softXEnt_loss(self, input, target):
         logprobs = torch.nn.functional.log_softmax(input, dim=1)
         return -(target * logprobs).sum() / input.shape[0]
@@ -172,11 +232,10 @@ class RewardModel:
 
         self.opt = torch.optim.Adam(self.paramlst, lr=self.lr)
 
-    def add_data(self, obs, act, rew, done):
-        sa_t = np.concatenate([obs, act], axis=-1)
+    def add_data(self, obs, action, rew, done):
         r_t = rew
 
-        flat_input = sa_t.reshape(1, self.da + self.ds)
+        flat_input = obs[np.newaxis, :]
         r_t = np.array(r_t)
         flat_target = r_t.reshape(1, 1)
 
@@ -216,11 +275,28 @@ class RewardModel:
 
         return np.mean(probs, axis=0), np.std(probs, axis=0)
 
+    def get_rank_probability_image(self, x_1, x_2):
+        # get probability x_1 > x_2
+        probs = []
+        for member in range(self.de):
+            probs.append(self.p_hat_image(x_1, x_2).cpu().numpy())
+        probs = np.array(probs)
+
+        return np.mean(probs, axis=0), np.std(probs, axis=0)
+
     def get_entropy(self, x_1, x_2):
         # get probability x_1 > x_2
         probs = []
         for member in range(self.de):
             probs.append(self.p_hat_entropy(x_1, x_2, member=member).cpu().numpy())
+        probs = np.array(probs)
+        return np.mean(probs, axis=0), np.std(probs, axis=0)
+
+    def get_entropy_image(self, x_1, x_2):
+        # get probability x_1 > x_2
+        probs = []
+        for member in range(self.de):
+            probs.append(self.p_hat_image(x_1, x_2).cpu().numpy())
         probs = np.array(probs)
         return np.mean(probs, axis=0), np.std(probs, axis=0)
 
@@ -236,11 +312,33 @@ class RewardModel:
         # taking 0 index for probability x_1 > x_2
         return F.softmax(r_hat, dim=-1)[:, 0]
 
+    def p_hat_image(self, x_1, x_2):
+        # softmaxing to get the probabilities according to eqn 1
+        with torch.no_grad():
+            r_hat1 = self.model(x_1)
+            r_hat2 = self.model(x_2)
+            r_hat1 = r_hat1.sum(axis=1)
+            r_hat2 = r_hat2.sum(axis=1)
+            r_hat = torch.cat([r_hat1, r_hat2], axis=-1)
+        return F.softmax(r_hat, dim=-1)[:, 0]
+
     def p_hat_entropy(self, x_1, x_2, member=-1):
         # softmaxing to get the probabilities according to eqn 1
         with torch.no_grad():
             r_hat1 = self.r_hat_member(x_1, member=member)
             r_hat2 = self.r_hat_member(x_2, member=member)
+            r_hat1 = r_hat1.sum(axis=1)
+            r_hat2 = r_hat2.sum(axis=1)
+            r_hat = torch.cat([r_hat1, r_hat2], axis=-1)
+
+        ent = F.softmax(r_hat, dim=-1) * F.log_softmax(r_hat, dim=-1)
+        ent = ent.sum(axis=-1).abs()
+        return ent
+
+    def p_hat_entropy_image(self, x_1, x_2):
+        with torch.no_grad():
+            r_hat1 = self.model(x_1)
+            r_hat2 = self.model(x_2)
             r_hat1 = r_hat1.sum(axis=1)
             r_hat2 = r_hat2.sum(axis=1)
             r_hat = torch.cat([r_hat1, r_hat2], axis=-1)
@@ -262,6 +360,22 @@ class RewardModel:
         r_hats = np.array(r_hats)
         return np.mean(r_hats)
 
+    def r_hat_image(self, x, to_numpy=False):
+        # the network parameterizes r hat in eqn 1 from the paper
+        # Data augmentation is applied to the input image x
+        for aug, func in self.augs_funcs.items():
+            # apply crop and cutout first
+            if 'crop' in aug or 'cutout' in aug:
+                x = func(x)
+            elif 'translate' in aug:
+                og_x = utils.center_crop_images(x, self.pre_image_size)
+                x, rndm_idxs = func(og_x, self.image_size, return_random_idxs=True)
+        x = torch.from_numpy(x).float().to(device)
+        r_hat = self.model(x)
+        if to_numpy:
+            r_hat = r_hat.detach().cpu().numpy()
+        return r_hat
+
     def r_hat_batch(self, x):
         # they say they average the rewards from each member of the ensemble, but I think this only makes sense if the rewards are already normalized
         # but I don't understand how the normalization should be happening right now :(
@@ -272,11 +386,43 @@ class RewardModel:
 
         return np.mean(r_hats, axis=0)
 
+    def r_hat_batch_image(self, x):
+        # data augmentation is applied to the input image x
+        for aug, func in self.augs_funcs.items():
+            # apply crop and cutout first
+            if 'crop' in aug or 'cutout' in aug:
+                x = func(x)
+            elif 'translate' in aug:
+                og_x = utils.center_crop_images(x, self.pre_image_size)
+                x, rndm_idxs = func(og_x, self.image_size, return_random_idxs=True)
+        r_hat = self.model(torch.from_numpy(x).float().to(device))
+
+        return r_hat.detach().cpu().numpy()
+
     def save(self, model_dir, step):
         for member in range(self.de):
             torch.save(
                 self.ensemble[member].state_dict(), '%s/reward_model_%s_%s.pt' % (model_dir, step, member)
             )
+
+    def state_dict(self, *args, **kwargs):
+        return_dict = {
+            "encoder": self.encoder.state_dict(),
+            "encoder_optimizer": self.encoder_optimizer.state_dict(),
+            "regression_layers": self.regression_layers.state_dict(),
+            "regression_optimizer": self.regression_optimizer.state_dict(),
+        }
+        if self.add_ssl:
+            return_dict["ssl_layers"] = self.ssl_layers.state_dict()
+            return_dict["ssl_optimizer"] = self.ssl_optimizer.state_dict()
+        return return_dict
+
+    def save_image_model(self, model_dir, step):
+        if not os.path.exists(model_dir):
+            os.makedirs(model_dir)
+            os.makedirs(model_dir)
+        path = os.path.join(model_dir, "reward_sim.pickle")
+        torch.save(self.state_dict(), path)
 
     def load(self, model_dir, step):
         for member in range(self.de):
@@ -316,6 +462,37 @@ class RewardModel:
         ensemble_acc = ensemble_acc / total
         return np.mean(ensemble_acc)
 
+    def get_train_acc_image(self):
+        acc = 0
+        max_len = self.capacity if self.buffer_full else self.buffer_index
+        batch_size = 256
+        num_epochs = int(np.ceil(max_len / batch_size))
+
+        total = 0
+        for epoch in range(num_epochs):
+            last_index = (epoch + 1) * batch_size
+            if (epoch + 1) * batch_size > max_len:
+                last_index = max_len
+
+            sa_t_1 = self.buffer_seg1[epoch * batch_size:last_index]
+            sa_t_2 = self.buffer_seg2[epoch * batch_size:last_index]
+            labels = self.buffer_label[epoch * batch_size:last_index]
+            labels = torch.from_numpy(labels.flatten()).long().to(device)
+            total += labels.size(0)
+
+            # get logits
+            r_hat1 = self.r_hat_image(sa_t_1)
+            r_hat2 = self.r_hat_image(sa_t_2)
+            r_hat1 = r_hat1.sum(axis=1)
+            r_hat2 = r_hat2.sum(axis=1)
+            r_hat = torch.cat([r_hat1, r_hat2], axis=-1)
+            _, predicted = torch.max(r_hat.data, 1)
+            correct = (predicted == labels).sum().item()
+            acc += correct
+
+        acc = acc / total
+        return acc
+
     def get_queries(self, mb_size=20):
         len_traj, max_len = len(self.inputs[0]), len(self.inputs)
         img_t_1, img_t_2 = None, None
@@ -328,16 +505,16 @@ class RewardModel:
         train_targets = np.array(self.targets[:max_len])
 
         batch_index_2 = np.random.choice(max_len, size=mb_size, replace=True)
-        sa_t_2 = train_inputs[batch_index_2]  # Batch x T x dim of s&a
+        sa_t_2 = train_inputs[batch_index_2]  # Batch x T x (Shape of obs)
         r_t_2 = train_targets[batch_index_2]  # Batch x T x 1
 
         batch_index_1 = np.random.choice(max_len, size=mb_size, replace=True)
         sa_t_1 = train_inputs[batch_index_1]  # Batch x T x dim of s&a
         r_t_1 = train_targets[batch_index_1]  # Batch x T x 1
 
-        sa_t_1 = sa_t_1.reshape(-1, sa_t_1.shape[-1])  # (Batch x T) x dim of s&a
+        sa_t_1 = sa_t_1.reshape(-1, *sa_t_1.shape[2:])  # (Batch x T) x dim of s&a
         r_t_1 = r_t_1.reshape(-1, r_t_1.shape[-1])  # (Batch x T) x 1
-        sa_t_2 = sa_t_2.reshape(-1, sa_t_2.shape[-1])  # (Batch x T) x dim of s&a
+        sa_t_2 = sa_t_2.reshape(-1, *sa_t_2.shape[2:])  # (Batch x T) x dim of s&a
         r_t_2 = r_t_2.reshape(-1, r_t_2.shape[-1])  # (Batch x T) x 1
 
         # Generate time index 
@@ -663,6 +840,55 @@ class RewardModel:
 
         return ensemble_acc
 
+    def train_reward_image(self):
+        acc = 0
+        max_len = self.capacity if self.buffer_full else self.buffer_index
+        batch_index = np.random.permutation(max_len)
+
+        num_epochs = int(np.ceil(max_len / self.train_batch_size))
+        total = 0
+
+        for epoch in range(num_epochs):
+            self.opt.zero_grad()
+
+            last_index = (epoch + 1) * self.train_batch_size
+            if last_index > max_len:
+                last_index = max_len
+
+            idxs = batch_index[epoch * self.train_batch_size:last_index]
+
+            sa_t_1 = self.buffer_seg1[idxs]
+            sa_t_2 = self.buffer_seg2[idxs]
+            labels = self.buffer_label[idxs]
+            labels = torch.from_numpy(labels.flatten()).long().to(device)
+
+            # get logits
+            sa_t_1 = sa_t_1.reshape(-1, *sa_t_1.shape[2:])
+
+            r_hat1 = self.r_hat_image(sa_t_1)
+            r_hat1 = r_hat1.reshape(-1, self.size_segment, 1)
+            sa_t_2 = sa_t_2.reshape(-1, *sa_t_2.shape[2:])
+            r_hat2 = self.r_hat_image(sa_t_2)
+            r_hat2 = r_hat2.reshape(-1, self.size_segment, 1)
+            r_hat1 = r_hat1.sum(axis=1)
+            r_hat2 = r_hat2.sum(axis=1)
+            r_hat = torch.cat([r_hat1, r_hat2], axis=-1)
+
+            # compute loss
+            loss = self.CEloss(r_hat, labels)
+
+            # compute acc
+            _, predicted = torch.max(r_hat.data, 1)
+            correct = (predicted == labels).sum().item()
+            acc += correct
+
+            loss.backward()
+            self.encoder_optimizer.step()
+            self.regression_optimizer.step()
+
+        acc = acc / max_len
+        return acc
+
     def train_soft_reward(self):
         ensemble_losses = [[] for _ in range(self.de)]
         ensemble_acc = np.array([0 for _ in range(self.de)])
@@ -761,22 +987,22 @@ class RewardSimSSL(nn.Module):
 
         self.augs_funcs = {}
 
-        # aug_to_func = {
-        #     'crop': rad.random_crop,
-        #     'grayscale': rad.random_grayscale,
-        #     'cutout': rad.random_cutout,
-        #     'cutout_color': rad.random_cutout_color,
-        #     'flip': rad.random_flip,
-        #     'rotate': rad.random_rotation,
-        #     'rand_conv': rad.random_convolution,
-        #     'color_jitter': rad.random_color_jitter,
-        #     'translate': rad.random_translate,
-        #     'no_aug': rad.no_aug,
-        # }
+        aug_to_func = {
+            'crop': rad.random_crop,
+            'grayscale': rad.random_grayscale,
+            'cutout': rad.random_cutout,
+            'cutout_color': rad.random_cutout_color,
+            'flip': rad.random_flip,
+            'rotate': rad.random_rotation,
+            'rand_conv': rad.random_convolution,
+            'color_jitter': rad.random_color_jitter,
+            'translate': rad.random_translate,
+            'no_aug': rad.no_aug,
+        }
 
-        # for aug_name in self.data_augs.split('-'):
-        #     assert aug_name in aug_to_func, 'invalid data aug string'
-        #     self.augs_funcs[aug_name] = aug_to_func[aug_name]
+        for aug_name in self.data_augs.split('-'):
+            assert aug_name in aug_to_func, 'invalid data aug string'
+            self.augs_funcs[aug_name] = aug_to_func[aug_name]
 
         # create encoder
         self.encoder = make_encoder(
@@ -863,7 +1089,7 @@ class RewardSimSSL(nn.Module):
         th_in = self.encoder(rotated_img)
         return th_in, self.ssl_layers(th_in)
 
-    def state_dict(self):
+    def state_dict(self, *args, **kwargs):
         return_dict = {
             "encoder": self.encoder.state_dict(),
             "encoder_optimizer": self.encoder_optimizer.state_dict(),
@@ -957,233 +1183,4 @@ class RewardSimSSL(nn.Module):
                 wandb_log['train/ssl_acc'] = ssl_acc_sum / self.update_per_epoch
             wlogger.wandb_log(wandb_log, step=step)
         return self
-
-
-class RewardSimTENT(nn.Module):
-    def __init__(self,
-                 encoder_type,
-                 encoder_feature_dim,
-                 num_layers,
-                 num_filters,
-                 obs_shape,
-                 dim_hidden,
-                 learning_rate,
-                 update_per_epoch,
-                 device,
-                 log_std_min=-10,
-                 log_std_max=2,
-                 ):
-        super(RewardSimTENT, self).__init__()
-        self.device = device
-        self.update_per_epoch = update_per_epoch
-        self.encoder_feature_dim = encoder_feature_dim
-        # self.action_shape = action_shape
-        self.learning_rate = learning_rate
-        self.dim_hidden = dim_hidden.split("_")
-        self.dim_hidden = [int(x) for x in self.dim_hidden]
-
-        self.collect_start = 0
-
-        self.augs_funcs = {}
-        # self.data_augs = data_augs
-
-        # aug_to_func = {
-        #     'crop': rad.random_crop,
-        #     'grayscale': rad.random_grayscale,
-        #     'cutout': rad.random_cutout,
-        #     'cutout_color': rad.random_cutout_color,
-        #     'flip': rad.random_flip,
-        #     'rotate': rad.random_rotation,
-        #     'rand_conv': rad.random_convolution,
-        #     'color_jitter': rad.random_color_jitter,
-        #     'translate': rad.random_translate,
-        #     'no_aug': rad.no_aug,
-        # }
-        #
-        # for aug_name in self.data_augs.split('-'):
-        #     assert aug_name in aug_to_func, 'invalid data aug string'
-        #     self.augs_funcs[aug_name] = aug_to_func[aug_name]
-
-        # create encoder
-        self.encoder = make_encoder(
-            encoder_type=encoder_type,
-            obs_shape=obs_shape,
-            feature_dim=self.encoder_feature_dim,
-            num_layers=num_layers,
-            num_filters=num_filters,
-            output_logits=True,
-            add_norm='group_norm',
-        )
-        self.input_dim = encoder_feature_dim
-        assert self.input_dim > 0, "reward dependency is wrong"
-
-        self.log_std_min = log_std_min
-        self.log_std_max = log_std_max
-
-        # build regression layers with dim_hidden, input dim is feature_dim + action_dim, output dim is 1
-        self.regression_layers = nn.Sequential()
-        ## init hidden layers
-        for i in range(len(self.dim_hidden)):
-            if i == 0:
-                self.regression_layers.add_module("linear_{}".format(i), nn.Linear(self.input_dim, self.dim_hidden[i]))
-            else:
-                self.regression_layers.add_module("linear_{}".format(i),
-                                                  nn.Linear(self.dim_hidden[i - 1], self.dim_hidden[i]))
-            self.regression_layers.add_module("relu_{}".format(i), nn.ReLU())
-        ## init output layer
-        self.regression_layers.add_module("linear_{}".format(len(self.dim_hidden)), nn.Linear(self.dim_hidden[-1], 2))
-        # init optimizer
-        params = list(self.regression_layers.parameters()) + list(self.encoder.parameters())
-        self.optimizer = torch.optim.Adam(params, lr=learning_rate)
-
-    def forward(self, next_feature):
-        # concate input as one tensor by the defined reward dependency
-        th_in = self.encoder(next_feature)
-        mu, log_std = self.regression_layers(th_in).chunk(2, dim=-1)
-
-        # constrain log_std inside [log_std_min, log_std_max]
-        log_std = torch.tanh(log_std)
-        log_std = self.log_std_min + 0.5 * (
-                self.log_std_max - self.log_std_min
-        ) * (log_std + 1)
-
-        distribution = torch.distributions.Normal(mu, log_std.exp())
-        reward = distribution.rsample()
-        return reward, mu, log_std
-
-    # def get_feature_state(self, next_obs):
-    #     # concate input as one tensor by the defined reward dependency
-    #     th_in = self.encoder(next_obs)
-    #     return th_in
-
-    def get_reward(self, next_feature):
-        reward, mu, log_std = self.forward(next_feature)
-        return reward
-
-    def state_dict(self):
-        return_dict = {
-            "encoder": self.encoder.state_dict(),
-            "regression_layers": self.regression_layers.state_dict(),
-            "regression_optimizer": self.optimizer.state_dict(),
-        }
-        return return_dict
-
-    def save(self, dir_name, file_name="reward_sim_tent"):
-        if not os.path.exists(dir_name):
-            os.makedirs(dir_name)
-        path = os.path.join(dir_name, file_name + ".pickle")
-        torch.save(self.state_dict(), path)
-
-    def load(self, dir_name, device, file_name="reward_sim_tent"):
-        path = os.path.join(dir_name, file_name + ".pickle")
-        loaded_pickle = torch.load(path, map_location=device)
-        self.encoder.load_state_dict(loaded_pickle["encoder"])
-        self.regression_layers.load_state_dict(loaded_pickle["regression_layers"])
-        self.optimizer.load_state_dict(loaded_pickle["regression_optimizer"])
-        return self
-
-    def update(self, replay_buffer, batch_size, step, logger=None, gradient_update_steps=1):
-        loss_sum = torch.zeros(1).to(self.device)
-        log_std_mean = torch.zeros(1).to(self.device)
-        ssl_loss_sum = torch.zeros(1).to(self.device)
-
-        for _ in range(gradient_update_steps):
-            # reward, next_obs = replay_buffer.sample_rad(self.augs_funcs)
-            obses, actions, rewards, next_obses, not_dones, not_dones_no_max, obses_img = replay_buffer.sample(batch_size, sample_img=True)
-
-            loss = None
-            # calculate reward loss
-            predicted_reward, mu, log_std = self.forward(obses_img)
-            reward_loss = F.gaussian_nll_loss(predicted_reward, rewards, var=log_std.exp())
-            loss = reward_loss
-
-            loss_sum += loss.detach()
-            # get ssl_loss, but it will not be used in training
-            distribution = torch.distributions.Normal(mu, log_std.exp())
-            ssl_loss = distribution.entropy().mean()
-            ssl_loss_sum += ssl_loss.detach()
-
-            log_std_mean += log_std.mean().detach()
-            self.optimizer.zero_grad()
-            loss.backward()
-
-            self.optimizer.step()
-        # logs
-        if logger is not None:
-            logger.log('train/img_reward_loss', loss_sum / (len(replay_buffer) // gradient_update_steps), step)
-
-        return self
-
-    def test_update(self, replay_buffer, step, update_times, buffer_mean_covr_tuple=None, wlogger=None, index=None):
-        for update in range(update_times):
-            obs, action, reward, next_obs, not_done = \
-                replay_buffer.sample_rad_for_sim_within_range(self.collect_start, self.augs_funcs)
-
-            # calculate ssl loss
-            reward, mu, log_std = self.forward(next_obs)
-            distribution = torch.distributions.Normal(mu, log_std.exp())
-            # loss equals to the entropy of the distribution
-            loss = distribution.entropy().mean()
-
-            # update
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
-        return self
-
-    def cal_loss(self, replay_buffer, step, buffer_mean_covr_tuple=None, wlogger=None):
-        obs, action, reward, next_obs, not_done = replay_buffer.sample_rad_for_sim(self.augs_funcs)
-        with torch.no_grad():
-            # calculate reward loss
-            predicted_reward, mu, log_std = self.forward(next_obs)
-            reward_loss = F.mse_loss(predicted_reward, reward)
-            # get ssl_loss
-            distribution = torch.distributions.Normal(mu, log_std.exp())
-            ssl_loss = distribution.entropy().mean()
-
-        # logs
-        if wlogger is not None:
-            wandb_log = dict()
-            wandb_log['train/reward_loss'] = reward_loss.cpu().detach().numpy()
-            wandb_log['train/ssl_loss'] = ssl_loss.cpu().detach().numpy()
-            wlogger.wandb_log(wandb_log, step=step)
-        return self
-
-    def update_collect_start(self, replay_buffer):
-        if self.args.collect_then_train:
-            self.collect_start = len(replay_buffer)
-        else:
-            raise ValueError("collect_then_train is False, cannot update collect_start")
-
-    def reinit_optimizer(self):
-        params = []
-        names = []
-        for nm, m in self.named_modules():
-            if isinstance(m, nn.BatchNorm2d):
-                for np, p in m.named_parameters():
-                    if np in ['weight', 'bias']:  # weight is scale, bias is shift
-                        params.append(p)
-                        names.append(f"{nm}.{np}")
-            if isinstance(m, nn.GroupNorm):
-                for np, p in m.named_parameters():
-                    if np in ['weight', 'bias']:
-                        params.append(p)
-                        names.append(f"{nm}.{np}")
-        self.optimizer = torch.optim.Adam(params, lr=self.learning_rate)
-
-    def prepare_for_test_time_train(self):
-        self.train()
-        self.requires_grad_(False)
-        # configure norm for tent updates: enable grad + force batch statisics
-        for m in self.modules():
-            if isinstance(m, torch.nn.BatchNorm2d):
-                m.requires_grad_(True)
-                # force use of batch stats in train and eval modes
-                m.track_running_stats = False
-                m.running_mean = None
-                m.running_var = None
-            if isinstance(m, torch.nn.GroupNorm):
-                m.requires_grad_(True)
-                m.affine = True
-        self.reinit_optimizer()
 

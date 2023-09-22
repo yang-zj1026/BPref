@@ -1,0 +1,31 @@
+agent:
+  name: sac_rad
+  class: agent.curl_sac.RadSacAgent
+  params:
+    obs_shape: ??? # to be specified later
+    action_shape: ??? # to be specified later
+    device: ${device}
+    hidden_dim: 1024
+    discount: 0.99
+    init_temperature: 0.1
+    alpha_lr: 1e-4
+    alpha_beta: 0.5
+    actor_lr: 1e-4
+    actor_beta: 0.9
+    actor_log_std_min: -10
+    actor_log_std_max: 2
+    actor_update_freq: 2
+    critic_lr: 1e-4
+    critic_beta: 0.9
+    critic_tau: 0.01
+    critic_target_update_freq: 2
+    encoder_type: pixel
+    encoder_feature_dim: 50
+    encoder_lr: 1e-3
+    encoder_tau: 0.05
+    num_layers: 4
+    num_filters: 32
+    log_interval: 1000
+    detach_encoder: false
+    latent_dim: 128
+    data_augs: 'crop'

@@ -14,11 +14,13 @@ import tqdm
 
 from logger import Logger
 from replay_buffer import ReplayBuffer
-from reward_model import RewardModel, RewardSimSSL, RewardSimTENT
+from reward_model import RewardModel, RewardSimSSL
 from collections import deque
 
 import utils
 import hydra
+
+import data_augs as rad
 
 
 class Workspace(object):
@@ -44,21 +46,24 @@ class Workspace(object):
         else:
             self.env = utils.make_env(cfg)
 
-        cfg.agent.params.obs_dim = self.env.observation_space.shape[0]
-        cfg.agent.params.action_dim = self.env.action_space.shape[0]
-        cfg.agent.params.action_range = [
-            float(self.env.action_space.low.min()),
-            float(self.env.action_space.high.max())
-        ]
+        self.env = utils.FrameStack(self.env, k=cfg.frame_stack)
+
+        cfg.agent.params.obs_shape = (3*cfg.frame_stack, cfg.image_size, cfg.image_size)
+        cfg.agent.params.action_shape = self.env.action_space.shape
+        # cfg.agent.params.action_range = [
+        #     float(self.env.action_space.low.min()),
+        #     float(self.env.action_space.high.max())
+        # ]
         self.agent = hydra.utils.instantiate(cfg.agent)
 
-        # hardcode image shape for now
         self.replay_buffer = ReplayBuffer(
             self.env.observation_space.shape,
             self.env.action_space.shape,
             int(cfg.replay_buffer_capacity),
+            cfg.batch_size,
+            cfg.image_size,
+            cfg.pre_transform_image_size,
             self.device,
-            obs_img_shape=(9, 100, 100),
         )
 
         # for logging
@@ -66,15 +71,21 @@ class Workspace(object):
         self.labeled_feedback = 0
         self.step = 0
 
+        # TODO: add image-based reward model, should consider SSL as well
         # instantiating the reward model
         self.reward_model = RewardModel(
             self.env.observation_space.shape[0],
             self.env.action_space.shape[0],
+            self.env.observation_space.shape,
+            cfg.pre_transform_image_size,
+            cfg.image_size,
+            data_augs='crop',
+            capacity=10000,
             ensemble_size=cfg.ensemble_size,
             size_segment=cfg.segment,
             activation=cfg.activation,
             lr=cfg.reward_lr,
-            mb_size=cfg.reward_batch,
+            mb_size=100,
             large_batch=cfg.large_batch,
             label_margin=cfg.label_margin,
             teacher_beta=cfg.teacher_beta,
@@ -82,22 +93,6 @@ class Workspace(object):
             teacher_eps_mistake=cfg.teacher_eps_mistake,
             teacher_eps_skip=cfg.teacher_eps_skip,
             teacher_eps_equal=cfg.teacher_eps_equal)
-
-        # add image-based reward model, hard-coded for now
-        self.image_reward_model = RewardSimTENT(
-            encoder_type='pixel',
-            encoder_feature_dim=50,
-            num_layers=4,
-            num_filters=32,
-            obs_shape=(9, 84, 84),
-            dim_hidden='2048_2048',
-            learning_rate=1e-4,
-            update_per_epoch=7,
-            device=self.device,
-        ).to(self.device)
-        #
-        self._k = 3
-        self._frames = deque(maxlen=self._k)
 
     def evaluate(self):
         average_episode_reward = 0
@@ -107,24 +102,23 @@ class Workspace(object):
         for episode in range(self.cfg.num_eval_episodes):
             frames = []
             obs = self.env.reset()
-            self.agent.reset()
+            # self.agent.reset()
             done = False
             episode_reward = 0
             true_episode_reward = 0
 
-            img_obs = self.env.render(mode='rgb_array', width=100, height=100)
+            frame = self.env.render(mode='rgb_array', width=256, height=256)
 
-            frames.append(img_obs)
+            frames.append(frame)
 
             if self.log_success:
                 episode_success = 0
 
             while not done:
                 with utils.eval_mode(self.agent):
-                    action = self.agent.act(obs, sample=False)
+                    obs = utils.center_crop_image(obs, self.cfg.image_size)
+                    action = self.agent.select_action(obs)
                 obs, reward, done, extra = self.env.step(action)
-                obs_img = self.env.render(mode='rgb_array', width=100, height=100)
-                frames.append(obs_img)
 
                 episode_reward += reward
                 true_episode_reward += reward
@@ -169,7 +163,7 @@ class Workspace(object):
                             self.step)
             self.logger.log('train/true_episode_success', success_rate,
                             self.step)
-        # self.logger.dump(self.step)
+        self.logger.dump(self.step)
 
     def learn_reward(self, first_flag=0):
 
@@ -205,9 +199,10 @@ class Workspace(object):
                 if self.cfg.label_margin > 0 or self.cfg.teacher_eps_equal > 0:
                     train_acc = self.reward_model.train_soft_reward()
                 else:
-                    train_acc = self.reward_model.train_reward()
-                total_acc = np.mean(train_acc)
-
+                    # train_acc = self.reward_model.train_reward()
+                    train_acc = self.reward_model.train_reward_image()
+                # total_acc = np.mean(train_acc)
+                total_acc = train_acc
                 if total_acc > 0.97:
                     break
 
@@ -229,8 +224,7 @@ class Workspace(object):
                 if self.step > 0:
                     self.logger.log('train/duration', time.time() - start_time, self.step)
                     start_time = time.time()
-                    # self.logger.dump(
-                    #     self.step, save=(self.step > self.cfg.num_seed_steps))
+                    self.logger.dump(self.step, save=(self.step > self.cfg.num_seed_steps))
 
                 # evaluate agent periodically
                 if self.step > 0 and self.step % self.cfg.eval_frequency == 0:
@@ -249,12 +243,8 @@ class Workspace(object):
                                     self.step)
 
                 obs = self.env.reset()
-                obs_img = self.env.render(height=100, width=100, mode='rgb_array')
-                obs_img = np.transpose(obs_img, (2, 0, 1))
-                for _ in range(self._k):
-                    self._frames.append(obs_img)
 
-                self.agent.reset()
+                # self.agent.reset()
                 done = False
                 episode_reward = 0
                 avg_train_true_return.append(true_episode_reward)
@@ -271,7 +261,7 @@ class Workspace(object):
                 action = self.env.action_space.sample()
             else:
                 with utils.eval_mode(self.agent):
-                    action = self.agent.act(obs, sample=True)
+                    action = self.agent.sample_action(obs)
 
             # run training update                
             if self.step == (self.cfg.num_seed_steps + self.cfg.num_unsup_steps):
@@ -306,8 +296,8 @@ class Workspace(object):
                     gradient_update=self.cfg.reset_update,
                     policy_update=True)
 
-                # Update image based reward
-                self.image_reward_model.update(self.replay_buffer, 256, self.step, self.logger)
+                # # Update image based reward
+                # self.image_reward_model.update(self.replay_buffer, 256, self.step, self.logger)
 
                 # reset interact_count
                 interact_count = 0
@@ -341,10 +331,7 @@ class Workspace(object):
 
                         interact_count = 0
 
-                self.agent.update(self.replay_buffer, self.logger, self.step, 1)
-
-                # Update image based reward
-                self.image_reward_model.update(self.replay_buffer, 256, self.step, self.logger)
+                self.agent.update(self.replay_buffer, self.logger, self.step)
 
             # unsupervised exploration
             elif self.step > self.cfg.num_seed_steps:
@@ -352,17 +339,15 @@ class Workspace(object):
                                             gradient_update=1, K=self.cfg.topK)
 
             next_obs, reward, done, extra = self.env.step(action)
-            reward_hat = self.reward_model.r_hat(np.concatenate([obs, action], axis=-1))
-
-            obs_img = self.env.render(height=100, width=100, mode='rgb_array')
-            obs_img = np.transpose(obs_img, (2, 0, 1))
-            self._frames.append(obs_img)
-            next_obs_img_stack = np.concatenate(list(self._frames))
+            state_obs = extra['state']
+            # reward_hat = self.reward_model.r_hat(np.concatenate([obs, action], axis=-1))
+            reward_obs = obs[np.newaxis, :]
+            reward_hat = self.reward_model.r_hat_image(reward_obs, to_numpy=True)
 
             # allow infinite bootstrap
             done = float(done)
             done_no_max = 0 if episode_step + 1 == self.env._max_episode_steps else done
-            episode_reward += reward_hat
+            episode_reward += reward_hat.item()
             true_episode_reward += reward
 
             if self.log_success:
@@ -372,7 +357,7 @@ class Workspace(object):
             self.reward_model.add_data(obs, action, reward, done)
             self.replay_buffer.add(
                 obs, action, reward_hat,
-                next_obs, done, done_no_max, next_obs_img_stack)
+                next_obs, done, done_no_max, state_obs)
 
             obs = next_obs
             episode_step += 1
@@ -380,8 +365,8 @@ class Workspace(object):
             interact_count += 1
 
         self.agent.save(self.work_dir, self.step)
-        self.reward_model.save(self.work_dir, self.step)
-        self.image_reward_model.save(self.work_dir)
+        # self.reward_model.save(self.work_dir, self.step)
+        self.reward_model.save_image_model(self.work_dir, self.step)
         # self.replay_buffer.save(self.work_dir)
 
 

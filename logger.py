@@ -28,7 +28,6 @@ COMMON_EVAL_FORMAT = [
     ('true_episode_success', 'TS', 'float'),
 ]
 
-
 AGENT_TRAIN_FORMAT = {
     'sac': [
         ('batch_reward', 'BR', 'float'),
@@ -42,11 +41,16 @@ AGENT_TRAIN_FORMAT = {
     'ppo': [
         ('batch_reward', 'BR', 'float'),
     ],
+    'sac_rad': [
+        ('batch_reward', 'BR', 'float'),
+        ('actor_loss', 'ALOSS', 'float'),
+        ('critic_loss', 'CLOSS', 'float'),
+        ('alpha_loss', 'TLOSS', 'float'),
+        ('alpha_value', 'TVAL', 'float'),
+        ('actor_entropy', 'AENT', 'float'),
+        ('bc_loss', 'BCLOSS', 'float'),
+    ]
 }
-
-IMAGE_REWARD_FORMAT = [
-    ('img_reward_loss', "IRLOSS", 'float'),
-]
 
 
 class AverageMeter(object):
@@ -150,7 +154,7 @@ class Logger(object):
             self._sw = None
         # each agent has specific output format for training
         assert agent in AGENT_TRAIN_FORMAT
-        train_format = COMMON_TRAIN_FORMAT + AGENT_TRAIN_FORMAT[agent] + IMAGE_REWARD_FORMAT
+        train_format = COMMON_TRAIN_FORMAT + AGENT_TRAIN_FORMAT[agent]
         self._train_mg = MetersGroup(os.path.join(log_dir, 'train'),
                                      formating=train_format)
         self._eval_mg = MetersGroup(os.path.join(log_dir, 'eval'),

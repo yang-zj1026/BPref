@@ -5,9 +5,9 @@ import gym
 import os
 import random
 import math
-import dmc2gym
-import metaworld
-import metaworld.envs.mujoco.env_dict as _env_dict
+import custom_dmc2gym.dmc2gym as dmc2gym
+#import metaworld
+#import metaworld.envs.mujoco.env_dict as _env_dict
 
 from collections import deque
 from gym.wrappers.time_limit import TimeLimit
@@ -16,7 +16,8 @@ from collections import deque
 from skimage.util.shape import view_as_windows
 from torch import nn
 from torch import distributions as pyd
-    
+
+
 def make_env(cfg):
     """Helper function to create dm_control environment"""
     if cfg.env == 'ball_in_cup_catch':
@@ -29,12 +30,18 @@ def make_env(cfg):
     env = dmc2gym.make(domain_name=domain_name,
                        task_name=task_name,
                        seed=cfg.seed,
-                       visualize_reward=False)
+                       visualize_reward=False,
+                       from_pixels=True,
+                       height=cfg.pre_transform_image_size,
+                       width=cfg.pre_transform_image_size,
+                       frame_skip=cfg.action_repeat,
+                       )
     env.seed(cfg.seed)
     assert env.action_space.low.min() >= -1
     assert env.action_space.high.max() <= 1
 
     return env
+
 
 def ppo_make_env(env_id, seed):
     """Helper function to create dm_control environment"""
@@ -55,40 +62,44 @@ def ppo_make_env(env_id, seed):
 
     return env
 
+
 def tie_weights(src, trg):
     assert type(src) == type(trg)
     trg.weight = src.weight
     trg.bias = src.bias
-    
+
+
 def make_metaworld_env(cfg):
-    env_name = cfg.env.replace('metaworld_','')
+    env_name = cfg.env.replace('metaworld_', '')
     if env_name in _env_dict.ALL_V2_ENVIRONMENTS:
         env_cls = _env_dict.ALL_V2_ENVIRONMENTS[env_name]
     else:
         env_cls = _env_dict.ALL_V1_ENVIRONMENTS[env_name]
-    
+
     env = env_cls()
-    
+
     env._freeze_rand_vec = False
     env._set_task_called = True
     env.seed(cfg.seed)
-    
+
     return TimeLimit(NormalizedBoxEnv(env), env.max_path_length)
 
+
 def ppo_make_metaworld_env(env_id, seed):
-    env_name = env_id.replace('metaworld_','')
+    env_name = env_id.replace('metaworld_', '')
     if env_name in _env_dict.ALL_V2_ENVIRONMENTS:
         env_cls = _env_dict.ALL_V2_ENVIRONMENTS[env_name]
     else:
         env_cls = _env_dict.ALL_V1_ENVIRONMENTS[env_name]
-    
+
     env = env_cls()
-    
+
     env._freeze_rand_vec = False
     env._set_task_called = True
     env.seed(seed)
-    
+
     return TimeLimit(env, env.max_path_length)
+
 
 class eval_mode(object):
     def __init__(self, *models):
@@ -121,10 +132,12 @@ class train_mode(object):
             model.train(state)
         return False
 
+
 def soft_update_params(net, target_net, tau):
     for param, target_param in zip(net.parameters(), target_net.parameters()):
         target_param.data.copy_(tau * param.data +
                                 (1 - tau) * target_param.data)
+
 
 def set_seed_everywhere(seed):
     torch.manual_seed(seed)
@@ -132,6 +145,7 @@ def set_seed_everywhere(seed):
         torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
     random.seed(seed)
+
 
 def make_dir(*path_parts):
     dir_path = os.path.join(*path_parts)
@@ -141,12 +155,14 @@ def make_dir(*path_parts):
         pass
     return dir_path
 
+
 def weight_init(m):
     """Custom weight init for Conv2D and Linear layers."""
     if isinstance(m, nn.Linear):
         nn.init.orthogonal_(m.weight.data)
         if hasattr(m.bias, 'data'):
             m.bias.data.fill_(0.0)
+
 
 class MLP(nn.Module):
     def __init__(self,
@@ -162,6 +178,7 @@ class MLP(nn.Module):
 
     def forward(self, x):
         return self.trunk(x)
+
 
 class TanhTransform(pyd.transforms.Transform):
     domain = pyd.constraints.real
@@ -191,7 +208,8 @@ class TanhTransform(pyd.transforms.Transform):
         # We use a formula that is more numerically stable, see details in the following link
         # https://github.com/tensorflow/probability/commit/ef6bb176e0ebd1cf6e25c6b5cecdd2428c22963f#diff-e120f70e92e6741bca649f04fcd907b7
         return 2.0 * (math.log(2.0) - x - F.softplus(-2.0 * x))
-    
+
+
 class SquashedNormal(pyd.transformed_distribution.TransformedDistribution):
     def __init__(self, loc, scale):
         self.loc = loc
@@ -207,7 +225,8 @@ class SquashedNormal(pyd.transformed_distribution.TransformedDistribution):
         for tr in self.transforms:
             mu = tr(mu)
         return mu
-    
+
+
 class TorchRunningMeanStd:
     def __init__(self, epsilon=1e-4, shape=(), device=None):
         self.mean = torch.zeros(shape, device=device)
@@ -232,7 +251,7 @@ class TorchRunningMeanStd:
 
 
 def update_mean_var_count_from_moments(
-    mean, var, count, batch_mean, batch_var, batch_count
+        mean, var, count, batch_mean, batch_var, batch_count
 ):
     delta = batch_mean - mean
     tot_count = count + batch_count
@@ -245,6 +264,7 @@ def update_mean_var_count_from_moments(
     new_count = tot_count
 
     return new_mean, new_var, new_count
+
 
 def mlp(input_dim, hidden_dim, output_dim, hidden_depth, output_mod=None):
     if hidden_depth == 0:
@@ -259,6 +279,7 @@ def mlp(input_dim, hidden_dim, output_dim, hidden_depth, output_mod=None):
     trunk = nn.Sequential(*mods)
     return trunk
 
+
 def to_np(t):
     if t is None:
         return None
@@ -266,3 +287,65 @@ def to_np(t):
         return np.array([])
     else:
         return t.cpu().detach().numpy()
+
+
+class FrameStack(gym.Wrapper):
+    def __init__(self, env, k):
+        gym.Wrapper.__init__(self, env)
+        self._k = k
+        self._frames = deque([], maxlen=k)
+        shp = env.observation_space.shape
+        self.observation_space = gym.spaces.Box(
+            low=0,
+            high=1,
+            shape=((shp[0] * k,) + shp[1:]),
+            dtype=env.observation_space.dtype
+        )
+        self._max_episode_steps = env._max_episode_steps
+
+    def reset(self):
+        obs = self.env.reset()
+        for _ in range(self._k):
+            self._frames.append(obs)
+        return self._get_obs()
+
+    def step(self, action):
+        obs, reward, done, info = self.env.step(action)
+        self._frames.append(obs)
+        return self._get_obs(), reward, done, info
+
+    def _get_obs(self):
+        assert len(self._frames) == self._k
+        return np.concatenate(list(self._frames), axis=0)
+
+
+def center_crop_image(image, output_size):
+    h, w = image.shape[1:]
+    new_h, new_w = output_size, output_size
+
+    top = (h - new_h)//2
+    left = (w - new_w)//2
+
+    image = image[:, top:top + new_h, left:left + new_w]
+    return image
+
+
+def center_crop_images(image, output_size):
+    h, w = image.shape[2:]
+    new_h, new_w = output_size, output_size
+
+    top = (h - new_h)//2
+    left = (w - new_w)//2
+
+    image = image[:, :, top:top + new_h, left:left + new_w]
+    return image
+
+
+def center_translate(image, size):
+    c, h, w = image.shape
+    assert size >= h and size >= w
+    outs = np.zeros((c, size, size), dtype=image.dtype)
+    h1 = (size - h) // 2
+    w1 = (size - w) // 2
+    outs[:, h1:h1 + h, w1:w1 + w] = image
+    return outs
