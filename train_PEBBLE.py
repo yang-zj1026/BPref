@@ -80,7 +80,7 @@ class Workspace(object):
             cfg.pre_transform_image_size,
             cfg.image_size,
             data_augs='crop',
-            capacity=10000,
+            capacity=cfg.reward_buffer_capacity,
             ensemble_size=cfg.ensemble_size,
             size_segment=cfg.segment,
             activation=cfg.activation,
@@ -140,7 +140,7 @@ class Workspace(object):
             video_dir = os.path.join(self.work_dir, "eval/{}".format(self.step))
             if not os.path.exists(video_dir):
                 os.makedirs(video_dir)
-            video_name = os.path.join(self.work_dir, "eval/{}/_{}.mp4".format(self.step, episode))
+            video_name = os.path.join(self.work_dir, "eval/{}/{}.mp4".format(self.step, episode))
             video = cv2.VideoWriter(video_name, cv2.VideoWriter_fourcc(*"mp4v"), 30, frame_size)
             for frame in frames:
                 if frame.shape[0] == 3:
