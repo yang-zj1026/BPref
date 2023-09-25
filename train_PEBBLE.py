@@ -120,6 +120,9 @@ class Workspace(object):
                     action = self.agent.select_action(obs)
                 obs, reward, done, extra = self.env.step(action)
 
+                frame = self.env.render(mode='rgb_array', width=256, height=256)
+                frames.append(frame)
+
                 episode_reward += reward
                 true_episode_reward += reward
                 if self.log_success:
