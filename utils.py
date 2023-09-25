@@ -349,3 +349,32 @@ def center_translate(image, size):
     w1 = (size - w) // 2
     outs[:, h1:h1 + h, w1:w1 + w] = image
     return outs
+
+
+def rotate(x):
+    """Randomly rotate a batch of images and return labels"""
+    # images = []
+    # image shape: [B, C, W, W]
+    assert type(x) == torch.Tensor, "x must be a tensor"
+    assert x.size(2) == x.size(3), "image must be square"
+    batch_size = x.size(0)
+    labels = torch.randint(4, (batch_size,), dtype=torch.long).to(x.device)
+    # transform labels to one-hot
+    onehot_labels = F.one_hot(labels, num_classes=4).float()
+
+    rot90_images = x.rot90(1, [2, 3])
+    rot180_images = x.rot90(2, [2, 3])
+    rot270_images = x.rot90(3, [2, 3])
+
+    mask = labels
+
+    channels = x.shape[1]
+    masks = [torch.zeros_like(mask) for _ in range(4)]
+    for i, m in enumerate(masks):
+        m[torch.where(mask == i)] = 1
+        m = m[:, None] * torch.ones([1, channels]).type(mask.dtype).type(x.dtype).to(x.device)
+        m = m[:, :, None, None]
+        masks[i] = m
+
+    out = masks[0] * x + masks[1] * rot90_images + masks[2] * rot180_images + masks[3] * rot270_images
+    return out, onehot_labels, labels

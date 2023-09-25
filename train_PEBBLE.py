@@ -79,13 +79,14 @@ class Workspace(object):
             self.env.observation_space.shape,
             cfg.pre_transform_image_size,
             cfg.image_size,
+            add_ssl=cfg.add_ssl,
             data_augs='crop',
             capacity=cfg.reward_buffer_capacity,
             ensemble_size=cfg.ensemble_size,
             size_segment=cfg.segment,
             activation=cfg.activation,
             lr=cfg.reward_lr,
-            mb_size=100,
+            mb_size=10,
             large_batch=cfg.large_batch,
             label_margin=cfg.label_margin,
             teacher_beta=cfg.teacher_beta,
@@ -335,6 +336,7 @@ class Workspace(object):
                         interact_count = 0
 
                 self.agent.update(self.replay_buffer, self.logger, self.step)
+                self.reward_model.train_ssl(self.replay_buffer, self.logger, self.step)
 
             # unsupervised exploration
             elif self.step > self.cfg.num_seed_steps:

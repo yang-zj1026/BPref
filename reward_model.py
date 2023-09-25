@@ -91,7 +91,9 @@ def compute_smallest_dist(obs, full_obs):
 
 
 class RewardModel:
-    def __init__(self, ds, da, obs_shape, pre_image_size, image_size, data_augs,
+    def __init__(self, ds, da, obs_shape,
+                 pre_image_size, image_size, data_augs,
+                 add_ssl=False, ssl_update_freq=8,
                  ensemble_size=3, lr=3e-4, mb_size=128, size_segment=1,
                  env_maker=None, max_size=100, activation='tanh', capacity=5e5,
                  large_batch=1, label_margin=0.0,
@@ -125,6 +127,8 @@ class RewardModel:
         self.buffer_full = False
 
         # self.construct_ensemble()
+        self.add_ssl = add_ssl
+        self.ssl_update_freq = ssl_update_freq
         self.construct_image_model()
         self.inputs = []
         self.targets = []
@@ -205,6 +209,23 @@ class RewardModel:
         paramlst = list(self.encoder.parameters()) + list(self.regression_layers.parameters())
         self.encoder_optimizer = torch.optim.Adam(self.encoder.parameters(), lr=self.lr)
         self.regression_optimizer = torch.optim.Adam(self.regression_layers.parameters(), lr=self.lr)
+
+        if self.add_ssl:
+            ssl_dim_hidden = '64_64'.split("_")
+            ssl_dim_hidden = [int(x) for x in ssl_dim_hidden]
+            self.ssl_layers = nn.Sequential()
+            for i in range(len(ssl_dim_hidden)):
+                if i == 0:
+                    self.ssl_layers.add_module("linear_{}".format(i), nn.Linear(encoder_feature_dim, ssl_dim_hidden[i]))
+                else:
+                    self.ssl_layers.add_module("linear_{}".format(i),
+                                               nn.Linear(ssl_dim_hidden[i - 1], ssl_dim_hidden[i]))
+                self.ssl_layers.add_module("relu_{}".format(i), nn.ReLU())
+            self.ssl_layers.add_module("linear_{}".format(len(ssl_dim_hidden)),
+                                       nn.Linear(ssl_dim_hidden[-1], 4))
+            self.ssl_layers.to(device)
+            self.ssl_optimizer = torch.optim.Adam(self.ssl_layers.parameters(), lr=self.lr)
+            self.ssl_criteria = nn.CrossEntropyLoss(reduction='none')
 
     def softXEnt_loss(self, input, target):
         logprobs = torch.nn.functional.log_softmax(input, dim=1)
@@ -429,6 +450,45 @@ class RewardModel:
             self.ensemble[member].load_state_dict(
                 torch.load('%s/reward_model_%s_%s.pt' % (model_dir, step, member))
             )
+
+    def get_ssl_prediction(self, x):
+        th_in = self.encoder(x)
+        return self.ssl_layers(th_in)
+
+    def get_ssl_loss(self, x, reduction='mean'):
+        # calculate ssl loss
+        rotated_obs, labels, labels_number = utils.rotate(x)
+        predicted_labels = self.get_ssl_prediction(rotated_obs)
+        if reduction == 'none':
+            ssl_loss = self.ssl_criteria(predicted_labels, labels)
+        else:
+            ssl_loss = self.ssl_criteria(predicted_labels, labels).mean()
+        return ssl_loss
+
+    def get_ssl_acc(self, x):
+        rotated_obs, labels, labels_number = utils.rotate(x)
+        predicted_labels = self.get_ssl_prediction(rotated_obs)
+        predicted_labels_number = torch.argmax(predicted_labels, dim=1)
+        correct_prediction = torch.sum(predicted_labels_number == labels_number).float()
+        ssl_acc = correct_prediction / labels.shape[0]
+        return ssl_acc
+
+    def train_ssl(self, replay_buffer, logger, step):
+        if step % self.ssl_update_freq:
+            # Sample replay buffer
+            obs, action, reward, next_obs, not_done = replay_buffer.sample_rad(self.augs_funcs)
+            ssl_loss = self.get_ssl_loss(next_obs)
+            ssl_acc = self.get_ssl_acc(next_obs)
+
+            # Optimize the model
+            self.encoder_optimizer.zero_grad()
+            self.ssl_optimizer.zero_grad()
+            ssl_loss.backward()
+            self.encoder_optimizer.step()
+            self.ssl_optimizer.step()
+
+            if step % 500 == 0:
+                print('ssl_loss: {:.4f}, ssl_acc: {:.2f}'.format(ssl_loss.detach().cpu().numpy().item(), ssl_acc.detach().cpu().numpy().item()))
 
     def get_train_acc(self):
         ensemble_acc = np.array([0 for _ in range(self.de)])
@@ -849,7 +909,8 @@ class RewardModel:
         total = 0
 
         for epoch in range(num_epochs):
-            self.opt.zero_grad()
+            self.encoder_optimizer.zero_grad()
+            self.regression_optimizer.zero_grad()
 
             last_index = (epoch + 1) * self.train_batch_size
             if last_index > max_len:
