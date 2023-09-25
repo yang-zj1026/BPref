@@ -80,12 +80,12 @@ class Workspace(object):
             cfg.pre_transform_image_size,
             cfg.image_size,
             data_augs='crop',
-            capacity=cfg.reward_buffer_capacity,
+            capacity=int(cfg.reward_buffer_capacity),
             ensemble_size=cfg.ensemble_size,
             size_segment=cfg.segment,
             activation=cfg.activation,
             lr=cfg.reward_lr,
-            mb_size=100,
+            mb_size=10,
             large_batch=cfg.large_batch,
             label_margin=cfg.label_margin,
             teacher_beta=cfg.teacher_beta,
@@ -119,6 +119,9 @@ class Workspace(object):
                     obs = utils.center_crop_image(obs, self.cfg.image_size)
                     action = self.agent.select_action(obs)
                 obs, reward, done, extra = self.env.step(action)
+
+                frame = self.env.render(mode='rgb_array', width=256, height=256)
+                frames.append(frame)
 
                 episode_reward += reward
                 true_episode_reward += reward
@@ -201,8 +204,8 @@ class Workspace(object):
                 else:
                     # train_acc = self.reward_model.train_reward()
                     train_acc = self.reward_model.train_reward_image()
-                # total_acc = np.mean(train_acc)
-                total_acc = train_acc
+                total_acc = np.mean(train_acc)
+                # total_acc = train_acc
                 if total_acc > 0.97:
                     break
 

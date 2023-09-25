@@ -125,7 +125,7 @@ class RewardModel:
         self.buffer_full = False
 
         # self.construct_ensemble()
-        self.construct_image_model()
+        self.construct_image_model_ensemble()
         self.inputs = []
         self.targets = []
         self.raw_actions = []
@@ -174,37 +174,38 @@ class RewardModel:
             assert aug_name in aug_to_func, 'invalid data aug string'
             self.augs_funcs[aug_name] = aug_to_func[aug_name]
 
-    def construct_image_model(self):
+    def construct_image_model_ensemble(self):
         # hardcode for now
-        dim_hidden = '256_256'.split("_")
-        dim_hidden = [int(x) for x in dim_hidden]
-        encoder_feature_dim = 50
-        self.encoder = make_encoder(
-            encoder_type='pixel',
-            obs_shape=self.obs_shape,
-            feature_dim=encoder_feature_dim,
-            num_layers=4,
-            num_filters=32,
-            output_logits=True,
-            add_norm='batch_norm',
-        )
-        self.regression_layers = nn.Sequential()
-        ## init hidden layers
-        for i in range(len(dim_hidden)):
-            if i == 0:
-                self.regression_layers.add_module("linear_{}".format(i), nn.Linear(encoder_feature_dim, dim_hidden[i]))
-            else:
-                self.regression_layers.add_module("linear_{}".format(i),
-                                                  nn.Linear(dim_hidden[i - 1], dim_hidden[i]))
-            self.regression_layers.add_module("relu_{}".format(i), nn.ReLU())
-        ## init output layer
-        self.regression_layers.add_module("linear_{}".format(len(dim_hidden)), nn.Linear(dim_hidden[-1], 1))
+        for i in range(self.de):
+            dim_hidden = '256_256'.split("_")
+            dim_hidden = [int(x) for x in dim_hidden]
+            encoder_feature_dim = 50
+            encoder = make_encoder(
+                encoder_type='pixel',
+                obs_shape=self.obs_shape,
+                feature_dim=encoder_feature_dim,
+                num_layers=4,
+                num_filters=32,
+                output_logits=True,
+                add_norm='batch_norm',
+            )
+            regression_layers = nn.Sequential()
+            ## init hidden layers
+            for i in range(len(dim_hidden)):
+                if i == 0:
+                    regression_layers.add_module("linear_{}".format(i), nn.Linear(encoder_feature_dim, dim_hidden[i]))
+                else:
+                    regression_layers.add_module("linear_{}".format(i),
+                                                    nn.Linear(dim_hidden[i - 1], dim_hidden[i]))
+                regression_layers.add_module("relu_{}".format(i), nn.ReLU())
+            ## init output layer
+            regression_layers.add_module("linear_{}".format(len(dim_hidden)), nn.Linear(dim_hidden[-1], 1))
 
-        self.model = nn.Sequential(self.encoder, self.regression_layers).to(device)
+            model = nn.Sequential(encoder, regression_layers).to(device)
+            self.ensemble.append(model)
+            self.paramlst.extend(model.parameters())
 
-        paramlst = list(self.encoder.parameters()) + list(self.regression_layers.parameters())
-        self.encoder_optimizer = torch.optim.Adam(self.encoder.parameters(), lr=self.lr)
-        self.regression_optimizer = torch.optim.Adam(self.regression_layers.parameters(), lr=self.lr)
+        self.opt = torch.optim.Adam(self.paramlst, lr=self.lr)
 
     def softXEnt_loss(self, input, target):
         logprobs = torch.nn.functional.log_softmax(input, dim=1)
@@ -312,6 +313,18 @@ class RewardModel:
         # taking 0 index for probability x_1 > x_2
         return F.softmax(r_hat, dim=-1)[:, 0]
 
+    def p_hat_member_image(self, x_1, x_2, member=-1):
+        # softmaxing to get the probabilities according to eqn 1
+        with torch.no_grad():
+            r_hat1 = self.r_hat_member_image(x_1, member=member)
+            r_hat2 = self.r_hat_member_image(x_2, member=member)
+            r_hat1 = r_hat1.sum(axis=1)
+            r_hat2 = r_hat2.sum(axis=1)
+            r_hat = torch.cat([r_hat1, r_hat2], axis=-1)
+
+        # taking 0 index for probability x_1 > x_2
+        return F.softmax(r_hat, dim=-1)[:, 0]
+
     def p_hat_image(self, x_1, x_2):
         # softmaxing to get the probabilities according to eqn 1
         with torch.no_grad():
@@ -371,10 +384,26 @@ class RewardModel:
                 og_x = utils.center_crop_images(x, self.pre_image_size)
                 x, rndm_idxs = func(og_x, self.image_size, return_random_idxs=True)
         x = torch.from_numpy(x).float().to(device)
-        r_hat = self.model(x)
+        r_hats = []
+        for member in range(self.de):
+            r_hats.append(self.r_hat_member_image(x, member=member, to_numpy=True))
+        r_hats = np.array(r_hats)
+        return np.mean(r_hats)
+
+    def r_hat_member_image(self, x, member, apply_aug=False, to_numpy=False):
+        if apply_aug:
+            for aug, func in self.augs_funcs.items():
+                # apply crop and cutout first
+                if 'crop' in aug or 'cutout' in aug:
+                    x = func(x)
+                elif 'translate' in aug:
+                    og_x = utils.center_crop_images(x, self.pre_image_size)
+                    x, rndm_idxs = func(og_x, self.image_size, return_random_idxs=True)
+            x = torch.from_numpy(x).float().to(device)
+        # get predicted reward from a reward member
         if to_numpy:
-            r_hat = r_hat.detach().cpu().numpy()
-        return r_hat
+            return self.ensemble[member](x).detach().cpu().numpy()
+        return self.ensemble[member](x)
 
     def r_hat_batch(self, x):
         # they say they average the rewards from each member of the ensemble, but I think this only makes sense if the rewards are already normalized
@@ -395,9 +424,12 @@ class RewardModel:
             elif 'translate' in aug:
                 og_x = utils.center_crop_images(x, self.pre_image_size)
                 x, rndm_idxs = func(og_x, self.image_size, return_random_idxs=True)
-        r_hat = self.model(torch.from_numpy(x).float().to(device))
+        r_hats = []
+        for member in range(self.de):
+            r_hats.append(self.r_hat_member_image(x, member=member, to_numpy=True).detach().cpu().numpy())
+        r_hats = np.array(r_hats)
 
-        return r_hat.detach().cpu().numpy()
+        return np.min(r_hats, axis=0)
 
     def save(self, model_dir, step):
         for member in range(self.de):
@@ -412,17 +444,19 @@ class RewardModel:
             "regression_layers": self.regression_layers.state_dict(),
             "regression_optimizer": self.regression_optimizer.state_dict(),
         }
-        if self.add_ssl:
-            return_dict["ssl_layers"] = self.ssl_layers.state_dict()
-            return_dict["ssl_optimizer"] = self.ssl_optimizer.state_dict()
+        # if self.add_ssl:
+        #     return_dict["ssl_layers"] = self.ssl_layers.state_dict()
+        #     return_dict["ssl_optimizer"] = self.ssl_optimizer.state_dict()
         return return_dict
 
     def save_image_model(self, model_dir, step):
-        if not os.path.exists(model_dir):
-            os.makedirs(model_dir)
-            os.makedirs(model_dir)
-        path = os.path.join(model_dir, "reward_sim.pickle")
-        torch.save(self.state_dict(), path)
+        for member in range(self.de):
+            torch.save(
+                self.ensemble[member].state_dict(), '%s/reward_model_%s_%s.pt' % (model_dir, step, member)
+            )
+        torch.save(
+            self.opt.state_dict(), '%s/opt_%s.pt' % (model_dir, step)
+        )
 
     def load(self, model_dir, step):
         for member in range(self.de):
@@ -841,53 +875,62 @@ class RewardModel:
         return ensemble_acc
 
     def train_reward_image(self):
-        acc = 0
+        ensemble_losses = [[] for _ in range(self.de)]
+        ensemble_acc = np.array([0 for _ in range(self.de)])
+
         max_len = self.capacity if self.buffer_full else self.buffer_index
-        batch_index = np.random.permutation(max_len)
+        total_batch_index = []
+        for _ in range(self.de):
+            total_batch_index.append(np.random.permutation(max_len))
 
         num_epochs = int(np.ceil(max_len / self.train_batch_size))
         total = 0
 
         for epoch in range(num_epochs):
             self.opt.zero_grad()
+            loss = 0.0
 
             last_index = (epoch + 1) * self.train_batch_size
             if last_index > max_len:
                 last_index = max_len
 
-            idxs = batch_index[epoch * self.train_batch_size:last_index]
+            for member in range(self.de):
+                idxs = total_batch_index[member][epoch * self.train_batch_size:last_index]
+                sa_t_1 = self.buffer_seg1[idxs]
+                sa_t_2 = self.buffer_seg2[idxs]
+                labels = self.buffer_label[idxs]
+                labels = torch.from_numpy(labels.flatten()).long().to(device)
 
-            sa_t_1 = self.buffer_seg1[idxs]
-            sa_t_2 = self.buffer_seg2[idxs]
-            labels = self.buffer_label[idxs]
-            labels = torch.from_numpy(labels.flatten()).long().to(device)
+                if member == 0:
+                    total += labels.size(0)
 
-            # get logits
-            sa_t_1 = sa_t_1.reshape(-1, *sa_t_1.shape[2:])
+                # get logits
+                sa_t_1 = sa_t_1.reshape(-1, *sa_t_1.shape[2:])
+                sa_t_2 = sa_t_2.reshape(-1, *sa_t_2.shape[2:])
 
-            r_hat1 = self.r_hat_image(sa_t_1)
-            r_hat1 = r_hat1.reshape(-1, self.size_segment, 1)
-            sa_t_2 = sa_t_2.reshape(-1, *sa_t_2.shape[2:])
-            r_hat2 = self.r_hat_image(sa_t_2)
-            r_hat2 = r_hat2.reshape(-1, self.size_segment, 1)
-            r_hat1 = r_hat1.sum(axis=1)
-            r_hat2 = r_hat2.sum(axis=1)
-            r_hat = torch.cat([r_hat1, r_hat2], axis=-1)
+                r_hat1 = self.r_hat_member_image(sa_t_1, member=member, apply_aug=True)
+                r_hat2 = self.r_hat_member_image(sa_t_2, member=member, apply_aug=True)
+                r_hat1 = r_hat1.reshape(-1, self.size_segment, 1)
+                r_hat2 = r_hat2.reshape(-1, self.size_segment, 1)
+                r_hat1 = r_hat1.sum(axis=1)
+                r_hat2 = r_hat2.sum(axis=1)
+                r_hat = torch.cat([r_hat1, r_hat2], axis=-1)
 
-            # compute loss
-            loss = self.CEloss(r_hat, labels)
+                # compute loss
+                curr_loss = self.CEloss(r_hat, labels)
+                loss += curr_loss
+                ensemble_losses[member].append(curr_loss.item())
 
-            # compute acc
-            _, predicted = torch.max(r_hat.data, 1)
-            correct = (predicted == labels).sum().item()
-            acc += correct
+                # compute acc
+                _, predicted = torch.max(r_hat.data, 1)
+                correct = (predicted == labels).sum().item()
+                ensemble_acc[member] += correct
 
             loss.backward()
-            self.encoder_optimizer.step()
-            self.regression_optimizer.step()
+            self.opt.step()
 
-        acc = acc / max_len
-        return acc
+        ensemble_acc = ensemble_acc / total
+        return ensemble_acc
 
     def train_soft_reward(self):
         ensemble_losses = [[] for _ in range(self.de)]
@@ -1096,9 +1139,9 @@ class RewardSimSSL(nn.Module):
             "regression_layers": self.regression_layers.state_dict(),
             "regression_optimizer": self.regression_optimizer.state_dict(),
         }
-        if self.add_ssl:
-            return_dict["ssl_layers"] = self.ssl_layers.state_dict()
-            return_dict["ssl_optimizer"] = self.ssl_optimizer.state_dict()
+        # if self.add_ssl:
+        #     return_dict["ssl_layers"] = self.ssl_layers.state_dict()
+        #     return_dict["ssl_optimizer"] = self.ssl_optimizer.state_dict()
         return return_dict
 
     def save(self, dir_name, file_name="reward_sim"):
