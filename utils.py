@@ -378,3 +378,48 @@ def rotate(x):
 
     out = masks[0] * x + masks[1] * rot90_images + masks[2] * rot180_images + masks[3] * rot270_images
     return out, onehot_labels, labels
+
+
+def get_mean_covr_numpy(np_array):
+    assert type(np_array) == np.ndarray, "input must be a numpy array"
+    # get mean and covariance
+    mean = np.mean(np_array, axis=0)
+    covr = np.cov(np_array, rowvar=False)
+    return mean, covr
+
+
+def get_mean_covr_tensor(th_tensor):
+    assert type(th_tensor) == torch.Tensor, "input must be a torch tensor"
+    # get mean and covariance
+    mean = torch.mean(th_tensor, dim=0)
+    covr = torch.cov(th_tensor.T)
+    return mean, covr
+
+
+def coral(cs, ct):
+    d = cs.shape[0]
+    loss = (cs - ct).pow(2).sum() / (4. * d ** 2)
+    return loss
+
+
+def get_mean_covr_loss(feature_list_np, batch_size, args):
+    mean_losses = []
+    covr_losses = []
+    feature_src_th = torch.tensor(feature_list_np[:batch_size])
+    # get feature mean and covariance
+    mean_src, covr_src = get_mean_covr_tensor(feature_src_th)
+    with torch.no_grad():
+        for i in range(1, len(feature_list_np) // batch_size):
+            feature = feature_list_np[i * batch_size: (i + 1) * batch_size]
+            # get covariance of feature
+            feature_th = torch.tensor(feature)
+            mean, covr = get_mean_covr_tensor(feature_th)
+            # get loss
+            mean_loss = F.mse_loss(mean_src, mean)
+            if args.use_coral_instead:
+                covr_loss = coral(covr_src, covr)
+            else:
+                covr_loss = torch.norm(covr_src - covr)
+            mean_losses.append(mean_loss.cpu().numpy())
+            covr_losses.append(covr_loss.cpu().numpy())
+    return np.mean(mean_losses), np.mean(covr_losses)

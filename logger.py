@@ -18,8 +18,6 @@ COMMON_TRAIN_FORMAT = [
     ('noisy_feedback', 'NR', 'int'),
     ('duration', 'D', 'time'),
     ('total_duration', 'TD', 'time'),
-    ('ssl_loss', 'SSL', 'float'),
-    ('ssl_acc', 'SSLA', 'float'),
 ]
 
 COMMON_EVAL_FORMAT = [

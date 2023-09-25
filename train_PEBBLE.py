@@ -79,8 +79,9 @@ class Workspace(object):
             self.env.observation_space.shape,
             cfg.pre_transform_image_size,
             cfg.image_size,
-            add_ssl=cfg.add_ssl,
             data_augs='crop',
+            cfg=cfg,
+            add_ssl=cfg.add_ssl,
             capacity=cfg.reward_buffer_capacity,
             ensemble_size=cfg.ensemble_size,
             size_segment=cfg.segment,
@@ -371,7 +372,7 @@ class Workspace(object):
 
         self.agent.save(self.work_dir, self.step)
         # self.reward_model.save(self.work_dir, self.step)
-        self.reward_model.save_image_model(self.work_dir, self.step)
+        self.reward_model.save_image_model(self.work_dir, self.step, self.replay_buffer)
         # self.replay_buffer.save(self.work_dir)
 
 

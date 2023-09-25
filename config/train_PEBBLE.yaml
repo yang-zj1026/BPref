@@ -60,6 +60,12 @@ seed: 1
 env: dog_stand
 gradient_update: 1
 
+# SSL
+new_alignment_coef: true
+alignment_loss_coef_feature: 0.5
+alignment_loss_coef_ssl_feature: 0.2
+use_coral_instead: false
+
 # hydra configuration
 hydra:
     name: ${env}

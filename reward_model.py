@@ -16,6 +16,7 @@ from scipy.stats import norm
 import utils
 from encoder import make_encoder
 import data_augs as rad
+import pickle
 
 device = 'cuda'
 
@@ -92,7 +93,7 @@ def compute_smallest_dist(obs, full_obs):
 
 class RewardModel:
     def __init__(self, ds, da, obs_shape,
-                 pre_image_size, image_size, data_augs,
+                 pre_image_size, image_size, data_augs, cfg,
                  add_ssl=False, ssl_update_freq=8,
                  ensemble_size=3, lr=3e-4, mb_size=128, size_segment=1,
                  env_maker=None, max_size=100, activation='tanh', capacity=5e5,
@@ -136,7 +137,7 @@ class RewardModel:
         self.img_inputs = []
         self.mb_size = mb_size
         self.origin_mb_size = mb_size
-        self.train_batch_size = 128
+        self.train_batch_size = 256
         self.CEloss = nn.CrossEntropyLoss()
         self.running_means = []
         self.running_stds = []
@@ -178,11 +179,14 @@ class RewardModel:
             assert aug_name in aug_to_func, 'invalid data aug string'
             self.augs_funcs[aug_name] = aug_to_func[aug_name]
 
+        self.cfg = cfg
+
     def construct_image_model(self):
         # hardcode for now
         dim_hidden = '256_256'.split("_")
         dim_hidden = [int(x) for x in dim_hidden]
         encoder_feature_dim = 50
+        self.encoder_feature_dim = encoder_feature_dim
         self.encoder = make_encoder(
             encoder_type='pixel',
             obs_shape=self.obs_shape,
@@ -420,6 +424,67 @@ class RewardModel:
 
         return r_hat.detach().cpu().numpy()
 
+    def get_feature_ssl_prediction(self, x):
+        th_in = self.encoder(x)
+        return th_in, self.ssl_layers(th_in)
+
+    def get_buffer_feature_ssl_mean_covr(self, replay_buffer, device):
+        # take out all obs
+        buffer_len = len(replay_buffer)
+        obs = replay_buffer.next_obses
+        for aug, func in self.augs_funcs.items():
+            # apply crop and cutout first
+            if 'crop' in aug or 'cutout' in aug:
+                obs = func(obs)
+            elif 'translate' in aug:
+                og_obs = utils.center_crop_images(obs, self.pre_image_size)
+                obs, rndm_idxs = func(og_obs, self.image_size, return_random_idxs=True)
+
+        # get feature states by using reward sim
+        iter_times = buffer_len // self.train_batch_size
+        feature_states = np.zeros((iter_times * self.train_batch_size, self.encoder_feature_dim))
+        ssl_states = np.zeros((iter_times * self.train_batch_size, 4))
+        for i in range(iter_times):
+            # get obs batch
+            obs_batch = obs[i * self.train_batch_size: (i + 1) * self.train_batch_size]
+            obs_batch = torch.as_tensor(obs_batch).to(device).float()
+            # rotate obs_batch
+            rotated_obs_batch, _, _ = utils.rotate(obs_batch)
+            # get feature and ssl state
+            with torch.no_grad():
+                feature_state, ssl_state = self.get_feature_ssl_prediction(rotated_obs_batch)
+            # store feature and ssl state
+            feature_states[i * self.train_batch_size: (i + 1) * self.train_batch_size] = feature_state.cpu().numpy()
+            ssl_states[i * self.train_batch_size: (i + 1) * self.train_batch_size] = ssl_state.cpu().numpy()
+
+        # get mean and covariance
+        feature_mean, feature_covr = utils.get_mean_covr_numpy(feature_states)
+        if self.cfg.new_alignment_coef:
+            MMD_SCALE_FACTOR = 0.5
+            feature_mean_loss, feature_covr_loss = utils.get_mean_covr_loss(feature_states, self.train_batch_size, self.cfg)
+            feature_mean_coef = self.cfg.alignment_loss_coef_feature / feature_mean_loss * MMD_SCALE_FACTOR
+            feature_covr_coef = self.cfg.alignment_loss_coef_feature / feature_covr_loss
+
+            ssl_mean_loss, ssl_covr_loss = utils.get_mean_covr_loss(ssl_states, self.train_batch_size, self.cfg)
+            ssl_mean_coef = self.cfg.alignment_loss_coef_ssl_feature / ssl_mean_loss * MMD_SCALE_FACTOR
+            ssl_covr_coef = self.cfg.alignment_loss_coef_ssl_feature / ssl_covr_loss
+        ssl_mean, ssl_covr = utils.get_mean_covr_numpy(ssl_states)
+
+        # transform to tensor
+        feature_mean = torch.as_tensor(feature_mean).to(device).float()
+        feature_covr = torch.as_tensor(feature_covr).to(device).float()
+        ssl_mean = torch.as_tensor(ssl_mean).to(device).float()
+        ssl_covr = torch.as_tensor(ssl_covr).to(device).float()
+
+        if self.cfg.new_alignment_coef:
+            print("feature_mean_coef: ", feature_mean_coef)
+            print("feature_covr_coef: ", feature_covr_coef)
+            print("ssl_mean_coef: ", ssl_mean_coef)
+            print("ssl_covr_coef: ", ssl_covr_coef)
+            return feature_mean, feature_covr, ssl_mean, ssl_covr, feature_mean_coef, feature_covr_coef, ssl_mean_coef, ssl_covr_coef
+        else:
+            return feature_mean, feature_covr, ssl_mean, ssl_covr
+
     def save(self, model_dir, step):
         for member in range(self.de):
             torch.save(
@@ -438,12 +503,19 @@ class RewardModel:
             return_dict["ssl_optimizer"] = self.ssl_optimizer.state_dict()
         return return_dict
 
-    def save_image_model(self, model_dir, step):
+    def save_image_model(self, model_dir, step, replay_buffer):
         if not os.path.exists(model_dir):
             os.makedirs(model_dir)
             os.makedirs(model_dir)
         path = os.path.join(model_dir, "reward_sim.pickle")
         torch.save(self.state_dict(), path)
+        if self.add_ssl:
+            buffer_mean_covr_tuple = self.get_buffer_feature_ssl_mean_covr(replay_buffer, device)
+            save_path = os.path.join(model_dir, "buffer_mean_covr_tuple_new_512.pickle")
+            with open(save_path, 'wb') as f:
+                pickle.dump(buffer_mean_covr_tuple, f)
+
+
 
     def load(self, model_dir, step):
         for member in range(self.de):
