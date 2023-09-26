@@ -94,7 +94,7 @@ def compute_smallest_dist(obs, full_obs):
 class RewardModel:
     def __init__(self, ds, da, obs_shape,
                  pre_image_size, image_size, data_augs, cfg,
-                 add_ssl=False, ssl_update_freq=8,
+                 add_ssl=False, ssl_update_freq=8, ssl_coeff=0.01,
                  ensemble_size=3, lr=3e-4, mb_size=128, size_segment=1,
                  env_maker=None, max_size=100, activation='tanh', capacity=5e5,
                  large_batch=1, label_margin=0.0,
@@ -127,9 +127,12 @@ class RewardModel:
         self.buffer_index = 0
         self.buffer_full = False
 
+        self.reward_update_steps = 0
+
         # self.construct_ensemble()
         self.add_ssl = add_ssl
         self.ssl_update_freq = ssl_update_freq
+        self.ssl_coeff = ssl_coeff
         self.construct_image_model()
         self.inputs = []
         self.targets = []
@@ -1018,12 +1021,37 @@ class RewardModel:
             correct = (predicted == labels).sum().item()
             acc += correct
 
+            if self.add_ssl and self.reward_update_steps % self.ssl_update_freq == 0:
+                # apply data augmentation
+                for aug, func in self.augs_funcs.items():
+                    # apply crop and cutout first
+                    if 'crop' in aug or 'cutout' in aug:
+                        sa_t_1 = func(sa_t_1)
+                    elif 'translate' in aug:
+                        og_x = utils.center_crop_images(sa_t_1, self.pre_image_size)
+                        sa_t_1, rndm_idxs = func(og_x, self.image_size, return_random_idxs=True)
+                sa_t_1 = torch.from_numpy(sa_t_1).float().to(device)
+                ssl_loss = self.get_ssl_loss(sa_t_1)
+                ssl_acc = self.get_ssl_acc(sa_t_1)
+                loss += self.ssl_coeff * ssl_loss
+                self.ssl_optimizer.zero_grad()
+
             loss.backward()
             self.encoder_optimizer.step()
             self.regression_optimizer.step()
 
+            if self.add_ssl:
+                self.ssl_optimizer.step()
+
+            self.reward_update_steps += 1
+
         acc = acc / max_len
-        return acc
+        info = {
+            'acc': acc,
+            'ssl_loss': ssl_loss.item(),
+            'ssl_acc': ssl_acc.item()
+        }
+        return info
 
     def train_soft_reward(self):
         ensemble_losses = [[] for _ in range(self.de)]

@@ -503,7 +503,7 @@ class RadSacAgent(object):
         entropy = 0.5 * log_std.shape[1] * \
                   (1.0 + np.log(2 * np.pi)) + log_std.sum(dim=-1)
 
-        if print_flag == 0:
+        if print_flag:
             L.log('train_actor/loss', actor_loss, step)
             L.log('train_actor/target_entropy', self.target_entropy, step)
             L.log('train_actor/entropy', entropy.mean(), step)
@@ -525,7 +525,7 @@ class RadSacAgent(object):
         self.log_alpha_optimizer.zero_grad()
         alpha_loss = (self.alpha *
                       (-log_pi - self.target_entropy).detach()).mean()
-        if print_flag == 0:
+        if print_flag:
             L.log('train_alpha/loss', alpha_loss, step)
             L.log('train_alpha/value', self.alpha, step)
             if wlogger:
@@ -572,10 +572,11 @@ class RadSacAgent(object):
         if step % self.log_interval == 0:
             L.log('train/batch_reward', reward.mean(), step)
 
-        self.update_critic(obs, action, reward, next_obs, not_done, L, step, wlogger)
+        self.update_critic(obs, action, reward, next_obs, not_done, L, step, print_flag=True,
+                           wlogger=wlogger)
 
         if step % self.actor_update_freq == 0:
-            self.update_actor_and_alpha(obs, L, step, wlogger)
+            self.update_actor_and_alpha(obs, L, step, print_flag=True, wlogger=wlogger)
 
         if step % self.critic_target_update_freq == 0:
             utils.soft_update_params(
@@ -613,7 +614,7 @@ class RadSacAgent(object):
 
     def update_critic_state_ent(
             self, obs, state_obs, full_state_obs, action, next_obs, not_done, logger,
-            step, K=5, print_flag=True):
+            step, K=5, print_flag=True, wlogger=None):
 
         mu, pi, log_pi, log_std = self.actor(next_obs)
         dist = torch.distributions.Normal(mu, torch.exp(log_std))
@@ -651,6 +652,18 @@ class RadSacAgent(object):
         if print_flag:
             logger.log('train_critic/loss', critic_loss, step)
 
+        if print_flag and wlogger is not None:
+            log_dict = {
+                'train_critic/loss': critic_loss,
+                'train_critic/entropy': state_entropy.mean(),
+                'train_critic/entropy_max': state_entropy.max(),
+                'train_critic/entropy_min': state_entropy.min(),
+                'train_critic/norm_entropy': norm_state_entropy.mean(),
+                'train_critic/norm_entropy_max': norm_state_entropy.max(),
+                'train_critic/norm_entropy_min': norm_state_entropy.min(),
+            }
+            wlogger.log(log_dict, step)
+
         # Optimize the critic
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
@@ -658,7 +671,7 @@ class RadSacAgent(object):
 
         self.critic.log(logger, step)
 
-    def update_state_ent(self, replay_buffer, logger, step, gradient_update=1, K=5):
+    def update_state_ent(self, replay_buffer, logger, step, gradient_update=1, K=5, wlogger=None):
         for index in range(gradient_update):
             obs, state_obs, full_state_obs, action, reward, next_obs, not_done, not_done_no_max = replay_buffer.sample_state_ent(256, self.augs_funcs)
 
@@ -669,10 +682,10 @@ class RadSacAgent(object):
 
             self.update_critic_state_ent(
                 obs, state_obs, full_state_obs, action, next_obs, not_done_no_max,
-                logger, step, K=K, print_flag=print_flag)
+                logger, step, K=K, print_flag=print_flag, wlogger=wlogger)
 
             if step % self.actor_update_freq == 0:
-                self.update_actor_and_alpha(obs, logger, step)
+                self.update_actor_and_alpha(obs, logger, step, print_flag=True, wlogger=wlogger)
 
         if step % self.critic_target_update_freq == 0:
             utils.soft_update_params(self.critic, self.critic_target,

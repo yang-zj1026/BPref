@@ -223,28 +223,30 @@ class Workspace(object):
             # update reward
             for epoch in range(self.cfg.reward_update):
                 if self.cfg.label_margin > 0 or self.cfg.teacher_eps_equal > 0:
-                    train_acc = self.reward_model.train_soft_reward()
+                    info = self.reward_model.train_soft_reward()
                 else:
                     # train_acc = self.reward_model.train_reward()
-                    train_acc = self.reward_model.train_reward_image()
+                    info = self.reward_model.train_reward_image()
                 # total_acc = np.mean(train_acc)
-                total_acc = train_acc
+                total_acc = info['acc']
                 if total_acc > 0.97:
                     break
 
         print("Reward function is updated!! ACC: " + str(total_acc))
+        print("SSL is updated, Loss: {:.4f}, ACC: {:.4f}".format(info['ssl_loss'], info['ssl_acc']))
 
         if self.wlogger:
             log_dict = {
                 'reward/acc': total_acc,
             }
+            if self.cfg.add_ssl:
+                log_dict['ssl_loss'] = info['ssl_loss']
+                log_dict['ssl_acc'] = info['ssl_acc']
             self.wlogger.log(log_dict, step=self.step)
 
-        if self.reward_update_steps % self.cfg.ssl_update_freq == 0:
-            ssl_acc = self.reward_model.train_ssl(self.replay_buffer, self.wlogger, self.step)
-            print("SSL is updated!! ACC: " + str(ssl_acc))
-
-        self.reward_update_steps += 1
+        # if self.reward_update_steps % self.cfg.ssl_update_freq == 0:
+        #     ssl_acc = self.reward_model.train_ssl(self.replay_buffer, self.wlogger, self.step)
+        #     print("SSL is updated!! ACC: " + str(ssl_acc))
 
     def run(self):
         episode, episode_reward, done = 0, 0, True
@@ -380,12 +382,12 @@ class Workspace(object):
 
                         interact_count = 0
 
-                self.agent.update(self.replay_buffer, self.logger, self.step)
+                self.agent.update(self.replay_buffer, self.logger, self.step, self.wlogger)
 
             # unsupervised exploration
             elif self.step > self.cfg.num_seed_steps:
                 self.agent.update_state_ent(self.replay_buffer, self.logger, self.step,
-                                            gradient_update=1, K=self.cfg.topK)
+                                            gradient_update=1, K=self.cfg.topK, wlogger=self.wlogger)
 
             next_obs, reward, done, extra = self.env.step(action)
             state_obs = extra['state']

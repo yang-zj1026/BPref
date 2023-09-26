@@ -39,7 +39,7 @@ add_ssl: true
 reward_schedule: 0
 
 num_train_steps: 1e6
-replay_buffer_capacity: 10000
+replay_buffer_capacity: 100000
 
 # evaluation config
 eval_frequency: 10000
