@@ -69,6 +69,7 @@ class Workspace(object):
         self.agent = hydra.utils.instantiate(cfg.agent)
 
         self.replay_buffer = ReplayBuffer(
+            self.cfg.env,
             self.env.observation_space.shape,
             self.env.action_space.shape,
             int(cfg.replay_buffer_capacity),
