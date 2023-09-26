@@ -5,7 +5,7 @@ import gym
 import os
 import random
 import math
-import custom_dmc2gym.dmc2gym as dmc2gym
+import dmc2gym
 #import metaworld
 #import metaworld.envs.mujoco.env_dict as _env_dict
 
@@ -16,6 +16,8 @@ from collections import deque
 from skimage.util.shape import view_as_windows
 from torch import nn
 from torch import distributions as pyd
+
+import datetime
 
 
 def make_env(cfg):
@@ -423,3 +425,16 @@ def get_mean_covr_loss(feature_list_np, batch_size, args):
             mean_losses.append(mean_loss.cpu().numpy())
             covr_losses.append(covr_loss.cpu().numpy())
     return np.mean(mean_losses), np.mean(covr_losses)
+
+
+def timeStamped(fmt='%m_%d_%H_%M_%S'):
+    """
+        Creates a timestamped filename, so we don't override our good work
+
+        Input:
+            fname: the given file name
+            fmt: the format of timestamp
+        Output:
+            a new file name with timestamp added
+    """
+    return datetime.datetime.now().strftime(fmt)

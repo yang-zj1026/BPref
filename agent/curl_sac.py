@@ -464,7 +464,7 @@ class RadSacAgent(object):
             mu, pi, _, _ = self.actor(obs, compute_log_pi=False)
             return pi.cpu().data.numpy().flatten()
 
-    def update_critic(self, obs, action, reward, next_obs, not_done, L, step, print_flag=False):
+    def update_critic(self, obs, action, reward, next_obs, not_done, L, step, print_flag=False, wlogger=None):
         with torch.no_grad():
             _, policy_action, log_pi, _ = self.actor(next_obs)
             target_Q1, target_Q2 = self.critic_target(next_obs, policy_action)
@@ -479,6 +479,11 @@ class RadSacAgent(object):
                                  target_Q) + F.mse_loss(current_Q2, target_Q)
         if print_flag:
             L.log('train_critic/loss', critic_loss, step)
+            if wlogger:
+                log_dict = {
+                    'train_critic/loss': critic_loss
+                }
+                wlogger.log(log_dict, step)
 
         # Optimize the critic
         self.critic_optimizer.zero_grad()
@@ -487,7 +492,7 @@ class RadSacAgent(object):
 
         self.critic.log(L, step)
 
-    def update_actor_and_alpha(self, obs, L, step, print_flag=False):
+    def update_actor_and_alpha(self, obs, L, step, print_flag=False, wlogger=None):
         # detach encoder, so we don't update it with the actor loss
         _, pi, log_pi, log_std = self.actor(obs, detach_encoder=True)
         actor_Q1, actor_Q2 = self.critic(obs, pi, detach_encoder=True)
@@ -502,6 +507,13 @@ class RadSacAgent(object):
             L.log('train_actor/loss', actor_loss, step)
             L.log('train_actor/target_entropy', self.target_entropy, step)
             L.log('train_actor/entropy', entropy.mean(), step)
+            if wlogger:
+                log_dict = {
+                    'train_actor/loss': actor_loss,
+                    'train_actor/target_entropy': self.target_entropy,
+                    'train_actor/entropy': entropy.mean()
+                }
+                wlogger.log(log_dict, step)
 
         # optimize the actor
         self.actor_optimizer.zero_grad()
@@ -516,6 +528,13 @@ class RadSacAgent(object):
         if print_flag == 0:
             L.log('train_alpha/loss', alpha_loss, step)
             L.log('train_alpha/value', self.alpha, step)
+            if wlogger:
+                log_dict = {
+                    'train_alpha/loss': alpha_loss,
+                    'train_alpha/value': self.alpha
+                }
+                wlogger.log(log_dict, step)
+
         alpha_loss.backward()
         self.log_alpha_optimizer.step()
 
@@ -544,7 +563,7 @@ class RadSacAgent(object):
         if print_flag == 0:
             L.log('train/curl_loss', loss, step)
 
-    def update(self, replay_buffer, L, step):
+    def update(self, replay_buffer, L, step, wlogger=None):
         if self.encoder_type == 'pixel':
             obs, action, reward, next_obs, not_done = replay_buffer.sample_rad(self.augs_funcs)
         else:
@@ -553,10 +572,10 @@ class RadSacAgent(object):
         if step % self.log_interval == 0:
             L.log('train/batch_reward', reward.mean(), step)
 
-        self.update_critic(obs, action, reward, next_obs, not_done, L, step)
+        self.update_critic(obs, action, reward, next_obs, not_done, L, step, wlogger)
 
         if step % self.actor_update_freq == 0:
-            self.update_actor_and_alpha(obs, L, step)
+            self.update_actor_and_alpha(obs, L, step, wlogger)
 
         if step % self.critic_target_update_freq == 0:
             utils.soft_update_params(
@@ -574,7 +593,7 @@ class RadSacAgent(object):
         #    obs_anchor, obs_pos = cpc_kwargs["obs_anchor"], cpc_kwargs["obs_pos"]
         #    self.update_cpc(obs_anchor, obs_pos,cpc_kwargs, L, step)
 
-    def update_after_reset(self, replay_buffer, logger, step, gradient_update=1, policy_update=True):
+    def update_after_reset(self, replay_buffer, logger, step, gradient_update=1, policy_update=True, wlogger=None):
         for index in range(gradient_update):
             obs, action, reward, next_obs, not_done = replay_buffer.sample_rad(self.augs_funcs)
 
@@ -584,10 +603,10 @@ class RadSacAgent(object):
                 print_flag = True
 
             self.update_critic(obs, action, reward, next_obs, not_done,
-                               logger, step, print_flag)
+                               logger, step, print_flag, wlogger)
 
             if index % self.actor_update_freq == 0 and policy_update:
-                self.update_actor_and_alpha(obs, logger, step, print_flag)
+                self.update_actor_and_alpha(obs, logger, step, print_flag, wlogger)
 
             if index % self.critic_target_update_freq == 0:
                 utils.soft_update_params(self.critic, self.critic_target, self.critic_tau)

@@ -545,22 +545,25 @@ class RewardModel:
         ssl_acc = correct_prediction / labels.shape[0]
         return ssl_acc
 
-    def train_ssl(self, replay_buffer, logger, step):
-        if step % self.ssl_update_freq:
-            # Sample replay buffer
-            obs, action, reward, next_obs, not_done = replay_buffer.sample_rad(self.augs_funcs)
-            ssl_loss = self.get_ssl_loss(next_obs)
-            ssl_acc = self.get_ssl_acc(next_obs)
+    def train_ssl(self, replay_buffer, wlogger, step):
+        # Sample replay buffer
+        obs, action, reward, next_obs, not_done = replay_buffer.sample_rad(self.augs_funcs)
+        ssl_loss = self.get_ssl_loss(next_obs)
+        ssl_acc = self.get_ssl_acc(next_obs)
 
-            # Optimize the model
-            self.encoder_optimizer.zero_grad()
-            self.ssl_optimizer.zero_grad()
-            ssl_loss.backward()
-            self.encoder_optimizer.step()
-            self.ssl_optimizer.step()
+        # Optimize the model
+        self.encoder_optimizer.zero_grad()
+        self.ssl_optimizer.zero_grad()
+        ssl_loss.backward()
+        self.encoder_optimizer.step()
+        self.ssl_optimizer.step()
 
-            if step % 500 == 0:
-                print('ssl_loss: {:.4f}, ssl_acc: {:.2f}'.format(ssl_loss.detach().cpu().numpy().item(), ssl_acc.detach().cpu().numpy().item()))
+        if wlogger:
+            log_dict = {
+                "train/ssl_loss": ssl_loss.item(),
+            }
+            wlogger.log(log_dict, step)
+        return ssl_acc.item()
 
     def get_train_acc(self):
         ensemble_acc = np.array([0 for _ in range(self.de)])

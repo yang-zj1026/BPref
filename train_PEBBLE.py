@@ -19,13 +19,16 @@ from collections import deque
 
 import utils
 import hydra
+import wandb
 
 import data_augs as rad
 
 
 class Workspace(object):
     def __init__(self, cfg):
-        self.work_dir = os.getcwd()
+        timestamp = utils.timeStamped()
+        run_name = timestamp + '_' + cfg.env + '_ssl_' + str(cfg.add_ssl) + '_freq_' + str(cfg.ssl_update_freq)
+        self.work_dir = os.path.join(os.getcwd(), run_name)
         print(f'workspace: {self.work_dir}')
 
         self.cfg = cfg
@@ -34,6 +37,15 @@ class Workspace(object):
             save_tb=cfg.log_save_tb,
             log_frequency=cfg.log_frequency,
             agent=cfg.agent.name)
+
+        # Add wandb logging
+        self.wlogger = None
+        if cfg.enable_wandb:
+            wandb_id = wandb.util.generate_id()
+            wandb.init(id=wandb_id, name=run_name,
+                       project=cfg.wandb_project, entity=cfg.wandb_entity, group=cfg.wandb_group)
+            wandb.config.update(cfg)
+            self.wlogger = wandb
 
         utils.set_seed_everywhere(cfg.seed)
         self.device = torch.device(cfg.device)
@@ -82,12 +94,13 @@ class Workspace(object):
             data_augs='crop',
             cfg=cfg,
             add_ssl=cfg.add_ssl,
+            ssl_update_freq=cfg.ssl_update_freq,
             capacity=cfg.reward_buffer_capacity,
             ensemble_size=cfg.ensemble_size,
             size_segment=cfg.segment,
             activation=cfg.activation,
             lr=cfg.reward_lr,
-            mb_size=10,
+            mb_size=cfg.reward_batch,
             large_batch=cfg.large_batch,
             label_margin=cfg.label_margin,
             teacher_beta=cfg.teacher_beta,
@@ -95,6 +108,8 @@ class Workspace(object):
             teacher_eps_mistake=cfg.teacher_eps_mistake,
             teacher_eps_skip=cfg.teacher_eps_skip,
             teacher_eps_equal=cfg.teacher_eps_equal)
+
+        self.reward_update_steps = 0
 
     def evaluate(self):
         average_episode_reward = 0
@@ -146,7 +161,7 @@ class Workspace(object):
             if not os.path.exists(video_dir):
                 os.makedirs(video_dir)
             video_name = os.path.join(self.work_dir, "eval/{}/{}.mp4".format(self.step, episode))
-            video = cv2.VideoWriter(video_name, cv2.VideoWriter_fourcc(*"mp4v"), 30, frame_size)
+            video = cv2.VideoWriter(video_name, cv2.VideoWriter_fourcc(*"avc1"), 30, frame_size)
             for frame in frames:
                 if frame.shape[0] == 3:
                     frame = frame.transpose(1, 2, 0)
@@ -168,10 +183,16 @@ class Workspace(object):
                             self.step)
             self.logger.log('train/true_episode_success', success_rate,
                             self.step)
+        if self.wlogger:
+            log_dict = {
+                'eval/episode_reward': average_episode_reward,
+                'eval/true_episode_reward': average_true_episode_reward,
+                'eval/video': wandb.Video(data_or_path=video_name, fps=30, format="gif")
+            }
+            self.wlogger.log(log_dict, step=self.step)
         self.logger.dump(self.step)
 
     def learn_reward(self, first_flag=0):
-
         # get feedbacks
         labeled_queries, noisy_queries = 0, 0
         if first_flag == 1:
@@ -213,6 +234,18 @@ class Workspace(object):
 
         print("Reward function is updated!! ACC: " + str(total_acc))
 
+        if self.wlogger:
+            log_dict = {
+                'reward/acc': total_acc,
+            }
+            self.wlogger.log(log_dict, step=self.step)
+
+        if self.reward_update_steps % self.cfg.ssl_update_freq == 0:
+            ssl_acc = self.reward_model.train_ssl(self.replay_buffer, self.wlogger, self.step)
+            print("SSL is updated!! ACC: " + str(ssl_acc))
+
+        self.reward_update_steps += 1
+
     def run(self):
         episode, episode_reward, done = 0, 0, True
         if self.log_success:
@@ -248,6 +281,17 @@ class Workspace(object):
                                     self.step)
 
                 obs = self.env.reset()
+
+                if self.wlogger:
+                    log_dict = {
+                        'train/episode_reward': episode_reward,
+                        'train/true_episode_reward': true_episode_reward,
+                        'train/total_feedback': self.total_feedback,
+                        'train/labeled_feedback': self.labeled_feedback,
+                    }
+                    if self.step > 0:
+                        log_dict['train/duration'] = time.time() - start_time
+                    self.wlogger.log(log_dict, step=self.step)
 
                 # self.agent.reset()
                 done = False
@@ -299,7 +343,7 @@ class Workspace(object):
                 self.agent.update_after_reset(
                     self.replay_buffer, self.logger, self.step,
                     gradient_update=self.cfg.reset_update,
-                    policy_update=True)
+                    policy_update=True, wlogger=self.wlogger)
 
                 # # Update image based reward
                 # self.image_reward_model.update(self.replay_buffer, 256, self.step, self.logger)
@@ -337,7 +381,6 @@ class Workspace(object):
                         interact_count = 0
 
                 self.agent.update(self.replay_buffer, self.logger, self.step)
-                self.reward_model.train_ssl(self.replay_buffer, self.logger, self.step)
 
             # unsupervised exploration
             elif self.step > self.cfg.num_seed_steps:
@@ -347,7 +390,7 @@ class Workspace(object):
             next_obs, reward, done, extra = self.env.step(action)
             state_obs = extra['state']
             # reward_hat = self.reward_model.r_hat(np.concatenate([obs, action], axis=-1))
-            reward_obs = obs[np.newaxis, :]
+            reward_obs = next_obs[np.newaxis, :]
             reward_hat = self.reward_model.r_hat_image(reward_obs, to_numpy=True)
 
             # allow infinite bootstrap
@@ -360,7 +403,7 @@ class Workspace(object):
                 episode_success = max(episode_success, extra['success'])
 
             # adding data to the reward training data
-            self.reward_model.add_data(obs, action, reward, done)
+            self.reward_model.add_data(next_obs, action, reward, done)
             self.replay_buffer.add(
                 obs, action, reward_hat,
                 next_obs, done, done_no_max, state_obs)
