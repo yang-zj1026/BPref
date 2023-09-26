@@ -1035,12 +1035,13 @@ class RewardModel:
                 ssl_acc = self.get_ssl_acc(sa_t_1)
                 loss += self.ssl_coeff * ssl_loss
                 self.ssl_optimizer.zero_grad()
+                print("SSL is updated, Loss: {:.4f}, ACC:{}".format(ssl_loss.item(), ssl_acc.item()))
 
             loss.backward()
             self.encoder_optimizer.step()
             self.regression_optimizer.step()
 
-            if self.add_ssl:
+            if self.add_ssl and self.reward_update_steps % self.ssl_update_freq == 0:
                 self.ssl_optimizer.step()
 
             self.reward_update_steps += 1
@@ -1048,8 +1049,6 @@ class RewardModel:
         acc = acc / max_len
         info = {
             'acc': acc,
-            'ssl_loss': ssl_loss.item(),
-            'ssl_acc': ssl_acc.item()
         }
         return info
 

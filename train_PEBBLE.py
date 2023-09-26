@@ -234,15 +234,11 @@ class Workspace(object):
                     break
 
         print("Reward function is updated!! ACC: " + str(total_acc))
-        print("SSL is updated, Loss: {:.4f}, ACC: {:.4f}".format(info['ssl_loss'], info['ssl_acc']))
 
         if self.wlogger:
             log_dict = {
                 'reward/acc': total_acc,
             }
-            if self.cfg.add_ssl:
-                log_dict['ssl_loss'] = info['ssl_loss']
-                log_dict['ssl_acc'] = info['ssl_acc']
             self.wlogger.log(log_dict, step=self.step)
 
         # if self.reward_update_steps % self.cfg.ssl_update_freq == 0:
