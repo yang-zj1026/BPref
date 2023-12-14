@@ -71,7 +71,7 @@ use_coral_instead: false
 enable_wandb: true
 wandb_entity: clvr
 wandb_project: p-reward-adaptation
-wandb_group: PEBBLE
+wandb_group: PEBBLE_${env}
 
 # hydra configuration
 hydra:
