@@ -220,6 +220,7 @@ class Workspace(object):
 
         train_acc = 0
         total_acc = 0
+        ssl_acc = 0
         if self.labeled_feedback > 0:
             # update reward
             for epoch in range(self.cfg.reward_update):
@@ -230,6 +231,7 @@ class Workspace(object):
                     info = self.reward_model.train_reward_image()
                 # total_acc = np.mean(train_acc)
                 total_acc = info['acc']
+                ssl_acc = info['ssl_acc']
                 if total_acc > 0.97:
                     break
 
@@ -237,8 +239,11 @@ class Workspace(object):
 
         if self.wlogger:
             log_dict = {
-                'reward/acc': total_acc,
+                'reward/reward_acc': total_acc,
             }
+            if ssl_acc > 0:
+                log_dict['reward/ssl_acc'] = ssl_acc
+
             self.wlogger.log(log_dict, step=self.step)
 
         # if self.reward_update_steps % self.cfg.ssl_update_freq == 0:

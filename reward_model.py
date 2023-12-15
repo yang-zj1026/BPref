@@ -984,6 +984,7 @@ class RewardModel:
         num_epochs = int(np.ceil(max_len / self.train_batch_size))
         total = 0
 
+        ssl_acc = None
         for epoch in range(num_epochs):
             self.encoder_optimizer.zero_grad()
             self.regression_optimizer.zero_grad()
@@ -1047,6 +1048,7 @@ class RewardModel:
         acc = acc / max_len
         info = {
             'acc': acc,
+            'ssl_acc': ssl_acc
         }
         return info
 
