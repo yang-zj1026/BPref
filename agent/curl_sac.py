@@ -698,6 +698,9 @@ class RadSacAgent(object):
         torch.save(
             self.critic.state_dict(), '%s/critic_%s.pt' % (model_dir, step)
         )
+        torch.save(
+            self.critic_target.state_dict(), '%s/critic_target_%s.pt' % (model_dir, step)
+        )
 
     def save_curl(self, model_dir, step):
         torch.save(
