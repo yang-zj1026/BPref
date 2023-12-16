@@ -984,7 +984,7 @@ class RewardModel:
         num_epochs = int(np.ceil(max_len / self.train_batch_size))
         total = 0
 
-        ssl_acc = None
+        ssl_acc = 0.
         for epoch in range(num_epochs):
             self.encoder_optimizer.zero_grad()
             self.regression_optimizer.zero_grad()
