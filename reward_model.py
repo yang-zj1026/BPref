@@ -495,7 +495,8 @@ class RewardModel:
         feature_mean, feature_covr = utils.get_mean_covr_numpy(feature_states)
         if self.cfg.new_alignment_coef:
             MMD_SCALE_FACTOR = 0.5
-            feature_mean_loss, feature_covr_loss = utils.get_mean_covr_loss(feature_states, self.train_batch_size, self.cfg)
+            feature_mean_loss, feature_covr_loss = utils.get_mean_covr_loss(feature_states, self.train_batch_size,
+                                                                            self.cfg)
             feature_mean_coef = self.cfg.alignment_loss_coef_feature / feature_mean_loss * MMD_SCALE_FACTOR
             feature_covr_coef = self.cfg.alignment_loss_coef_feature / feature_covr_loss
 
@@ -540,19 +541,15 @@ class RewardModel:
     def save_image_model(self, model_dir, step, replay_buffer):
         if not os.path.exists(model_dir):
             os.makedirs(model_dir)
-            os.makedirs(model_dir)
         for member in range(self.de):
             torch.save(
-                self.ensemble[member].state_dict(), '%s/reward_model_%s_%s.pt' % (model_dir, step, member)
+                self.ensemble[member].state_dict(), '%s/reward_model_%s.pickle' % (model_dir, member)
             )
-        torch.save(
-            self.opt.state_dict(), '%s/opt_%s.pt' % (model_dir, step)
-        )
-        path = os.path.join(model_dir, "reward_sim.pickle")
-        torch.save(self.state_dict(), path)
+        torch.save(self.opt.state_dict(), '%s/opt_%s.pt' % (model_dir, step))
+
         if self.add_ssl:
             buffer_mean_covr_tuple = self.get_buffer_feature_ssl_mean_covr(replay_buffer, device)
-            save_path = os.path.join(model_dir, "buffer_mean_covr_tuple_new_512.pickle")
+            save_path = os.path.join(model_dir, "buffer_mean_covr_tuple_new.pickle")
             with open(save_path, 'wb') as f:
                 pickle.dump(buffer_mean_covr_tuple, f)
 
@@ -1027,6 +1024,7 @@ class RewardModel:
         total = 0
         loss = 0.0
 
+        ssl_acc = 0.
         for epoch in range(num_epochs):
             self.opt.zero_grad()
 
@@ -1093,6 +1091,7 @@ class RewardModel:
         acc = ensemble_acc / max_len
         info = {
             'acc': acc,
+            'ssl_acc': ssl_acc
         }
         return info
 
@@ -1333,9 +1332,10 @@ class RewardSimSSL(nn.Module):
             ssl_loss_sum = torch.zeros(1).to(self.device)
             ssl_acc_sum = torch.zeros(1).to(self.device)
 
-        for _ in range(len(replay_buffer) // batch_size):   # iterate all data
+        for _ in range(len(replay_buffer) // batch_size):  # iterate all data
             # reward, next_obs = replay_buffer.sample(batch_size)
-            obses, actions, rewards, next_obses, not_dones, not_dones_no_max, obses_img = replay_buffer.sample(batch_size)
+            obses, actions, rewards, next_obses, not_dones, not_dones_no_max, obses_img = replay_buffer.sample(
+                batch_size)
             loss = None
             # calculate reward loss
             predicted_reward = self.get_reward(obses_img)
@@ -1390,4 +1390,3 @@ class RewardSimSSL(nn.Module):
                 wandb_log['train/ssl_acc'] = ssl_acc_sum / self.update_per_epoch
             wlogger.wandb_log(wandb_log, step=step)
         return self
-
