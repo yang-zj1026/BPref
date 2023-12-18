@@ -27,5 +27,5 @@ agent:
     num_filters: 32
     log_interval: 1000
     detach_encoder: false
-    latent_dim: 128
+    latent_dim: 50
     data_augs: 'crop'

@@ -4,11 +4,17 @@ import numpy as np
 import torch
 import utils
 
+state_dim = {
+    'walker_walk': 24,
+    'quadruped_walk': 78,
+    'cheetah_run': 17,
+}
+
 
 class ReplayBuffer(object):
     """Buffer to store environment transitions."""
 
-    def __init__(self, obs_shape, action_shape, capacity, batch_size, image_size, pre_image_size, device, window=1,
+    def __init__(self, env_name, obs_shape, action_shape, capacity, batch_size, image_size, pre_image_size, device, window=1,
                  transform=None):
         self.capacity = capacity
         self.device = device
@@ -29,7 +35,7 @@ class ReplayBuffer(object):
         self.window = window
 
         # For unsupervised learning, hardcode the state obs to be 24
-        self.state_obses = np.empty((capacity, 24), dtype=np.float32)
+        self.state_obses = np.empty((capacity, state_dim[env_name]), dtype=np.float32)
 
         self.idx = 0
         self.last_save = 0

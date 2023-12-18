@@ -32,7 +32,8 @@ teacher_gamma: 1
 teacher_eps_mistake: 0
 teacher_eps_skip: 0
 teacher_eps_equal: 0
-reward_buffer_capacity: 1000
+reward_buffer_capacity: 10000
+add_ssl: true
 
 # scheduling
 reward_schedule: 0
@@ -58,6 +59,19 @@ seed: 1
 # Environment
 env: dog_stand
 gradient_update: 1
+
+# SSL
+ssl_update_freq: 1
+new_alignment_coef: true
+alignment_loss_coef_feature: 0.5
+alignment_loss_coef_ssl_feature: 0.2
+use_coral_instead: false
+
+# Wandb
+enable_wandb: true
+wandb_entity: clvr
+wandb_project: p-reward-adaptation
+wandb_group: PEBBLE
 
 # hydra configuration
 hydra:

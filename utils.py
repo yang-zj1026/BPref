@@ -5,7 +5,7 @@ import gym
 import os
 import random
 import math
-import custom_dmc2gym.dmc2gym as dmc2gym
+import dmc2gym
 #import metaworld
 #import metaworld.envs.mujoco.env_dict as _env_dict
 
@@ -16,6 +16,8 @@ from collections import deque
 from skimage.util.shape import view_as_windows
 from torch import nn
 from torch import distributions as pyd
+
+import datetime
 
 
 def make_env(cfg):
@@ -349,3 +351,90 @@ def center_translate(image, size):
     w1 = (size - w) // 2
     outs[:, h1:h1 + h, w1:w1 + w] = image
     return outs
+
+
+def rotate(x):
+    """Randomly rotate a batch of images and return labels"""
+    # images = []
+    # image shape: [B, C, W, W]
+    assert type(x) == torch.Tensor, "x must be a tensor"
+    assert x.size(2) == x.size(3), "image must be square"
+    batch_size = x.size(0)
+    labels = torch.randint(4, (batch_size,), dtype=torch.long).to(x.device)
+    # transform labels to one-hot
+    onehot_labels = F.one_hot(labels, num_classes=4).float()
+
+    rot90_images = x.rot90(1, [2, 3])
+    rot180_images = x.rot90(2, [2, 3])
+    rot270_images = x.rot90(3, [2, 3])
+
+    mask = labels
+
+    channels = x.shape[1]
+    masks = [torch.zeros_like(mask) for _ in range(4)]
+    for i, m in enumerate(masks):
+        m[torch.where(mask == i)] = 1
+        m = m[:, None] * torch.ones([1, channels]).type(mask.dtype).type(x.dtype).to(x.device)
+        m = m[:, :, None, None]
+        masks[i] = m
+
+    out = masks[0] * x + masks[1] * rot90_images + masks[2] * rot180_images + masks[3] * rot270_images
+    return out, onehot_labels, labels
+
+
+def get_mean_covr_numpy(np_array):
+    assert type(np_array) == np.ndarray, "input must be a numpy array"
+    # get mean and covariance
+    mean = np.mean(np_array, axis=0)
+    covr = np.cov(np_array, rowvar=False)
+    return mean, covr
+
+
+def get_mean_covr_tensor(th_tensor):
+    assert type(th_tensor) == torch.Tensor, "input must be a torch tensor"
+    # get mean and covariance
+    mean = torch.mean(th_tensor, dim=0)
+    covr = torch.cov(th_tensor.T)
+    return mean, covr
+
+
+def coral(cs, ct):
+    d = cs.shape[0]
+    loss = (cs - ct).pow(2).sum() / (4. * d ** 2)
+    return loss
+
+
+def get_mean_covr_loss(feature_list_np, batch_size, args):
+    mean_losses = []
+    covr_losses = []
+    feature_src_th = torch.tensor(feature_list_np[:batch_size])
+    # get feature mean and covariance
+    mean_src, covr_src = get_mean_covr_tensor(feature_src_th)
+    with torch.no_grad():
+        for i in range(1, len(feature_list_np) // batch_size):
+            feature = feature_list_np[i * batch_size: (i + 1) * batch_size]
+            # get covariance of feature
+            feature_th = torch.tensor(feature)
+            mean, covr = get_mean_covr_tensor(feature_th)
+            # get loss
+            mean_loss = F.mse_loss(mean_src, mean)
+            if args.use_coral_instead:
+                covr_loss = coral(covr_src, covr)
+            else:
+                covr_loss = torch.norm(covr_src - covr)
+            mean_losses.append(mean_loss.cpu().numpy())
+            covr_losses.append(covr_loss.cpu().numpy())
+    return np.mean(mean_losses), np.mean(covr_losses)
+
+
+def timeStamped(fmt='%m_%d_%H_%M_%S'):
+    """
+        Creates a timestamped filename, so we don't override our good work
+
+        Input:
+            fname: the given file name
+            fmt: the format of timestamp
+        Output:
+            a new file name with timestamp added
+    """
+    return datetime.datetime.now().strftime(fmt)
