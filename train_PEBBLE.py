@@ -15,6 +15,7 @@ import tqdm
 from logger import Logger
 from replay_buffer import ReplayBuffer
 from reward_model import RewardModel, RewardSimSSL
+from reward_model_ensemble import RewardModelEnsemble
 from collections import deque
 
 import utils
@@ -86,29 +87,54 @@ class Workspace(object):
 
         # TODO: add image-based reward model, should consider SSL as well
         # instantiating the reward model
-        self.reward_model = RewardModel(
-            self.env.observation_space.shape[0],
-            self.env.action_space.shape[0],
-            self.env.observation_space.shape,
-            cfg.pre_transform_image_size,
-            cfg.image_size,
-            data_augs='crop',
-            cfg=cfg,
-            add_ssl=cfg.add_ssl,
-            ssl_update_freq=cfg.ssl_update_freq,
-            capacity=cfg.reward_buffer_capacity,
-            ensemble_size=cfg.ensemble_size,
-            size_segment=cfg.segment,
-            activation=cfg.activation,
-            lr=cfg.reward_lr,
-            mb_size=cfg.reward_batch,
-            large_batch=cfg.large_batch,
-            label_margin=cfg.label_margin,
-            teacher_beta=cfg.teacher_beta,
-            teacher_gamma=cfg.teacher_gamma,
-            teacher_eps_mistake=cfg.teacher_eps_mistake,
-            teacher_eps_skip=cfg.teacher_eps_skip,
-            teacher_eps_equal=cfg.teacher_eps_equal)
+        if cfg.use_ensemble:
+            self.reward_model = RewardModelEnsemble(
+                self.env.observation_space.shape[0],
+                self.env.action_space.shape[0],
+                self.env.observation_space.shape,
+                cfg.pre_transform_image_size,
+                cfg.image_size,
+                data_augs='crop',
+                cfg=cfg,
+                add_ssl=cfg.add_ssl,
+                ssl_update_freq=cfg.ssl_update_freq,
+                capacity=cfg.reward_buffer_capacity,
+                ensemble_size=cfg.ensemble_size,
+                size_segment=cfg.segment,
+                activation=cfg.activation,
+                lr=cfg.reward_lr,
+                mb_size=cfg.reward_batch,
+                large_batch=cfg.large_batch,
+                label_margin=cfg.label_margin,
+                teacher_beta=cfg.teacher_beta,
+                teacher_gamma=cfg.teacher_gamma,
+                teacher_eps_mistake=cfg.teacher_eps_mistake,
+                teacher_eps_skip=cfg.teacher_eps_skip,
+                teacher_eps_equal=cfg.teacher_eps_equal)
+        else:
+            self.reward_model = RewardModel(
+                self.env.observation_space.shape[0],
+                self.env.action_space.shape[0],
+                self.env.observation_space.shape,
+                cfg.pre_transform_image_size,
+                cfg.image_size,
+                data_augs='crop',
+                cfg=cfg,
+                add_ssl=cfg.add_ssl,
+                ssl_update_freq=cfg.ssl_update_freq,
+                capacity=cfg.reward_buffer_capacity,
+                ensemble_size=cfg.ensemble_size,
+                size_segment=cfg.segment,
+                activation=cfg.activation,
+                lr=cfg.reward_lr,
+                mb_size=cfg.reward_batch,
+                large_batch=cfg.large_batch,
+                label_margin=cfg.label_margin,
+                teacher_beta=cfg.teacher_beta,
+                teacher_gamma=cfg.teacher_gamma,
+                teacher_eps_mistake=cfg.teacher_eps_mistake,
+                teacher_eps_skip=cfg.teacher_eps_skip,
+                teacher_eps_equal=cfg.teacher_eps_equal)
 
         self.reward_update_steps = 0
 
@@ -218,9 +244,7 @@ class Workspace(object):
         self.total_feedback += self.reward_model.mb_size
         self.labeled_feedback += labeled_queries
 
-        train_acc = 0
         total_acc = 0
-        ssl_acc = 0
         if self.labeled_feedback > 0:
             # update reward
             for epoch in range(self.cfg.reward_update):
@@ -231,18 +255,16 @@ class Workspace(object):
                     info = self.reward_model.train_reward_image()
                 # total_acc = np.mean(train_acc)
                 total_acc = info['acc']
-                ssl_acc = info['ssl_acc']
-                if total_acc > 0.97:
+                if info['acc'] > 0.97:
                     break
 
         print("Reward function is updated!! ACC: " + str(total_acc))
 
         if self.wlogger:
-            log_dict = {
-                'reward/reward_acc': total_acc,
-            }
-            if ssl_acc > 0:
-                log_dict['reward/ssl_acc'] = ssl_acc
+            log_dict = {}
+            for key, value in info.items():
+                new_key = 'reward/' + key
+                log_dict[new_key] = value
 
             self.wlogger.log(log_dict, step=self.step)
 
@@ -331,8 +353,8 @@ class Workspace(object):
 
                 # update margin --> not necessary / will be updated soon
                 new_margin = np.mean(avg_train_true_return) * (self.cfg.segment / self.env._max_episode_steps)
-                self.reward_model.set_teacher_thres_skip(new_margin)
-                self.reward_model.set_teacher_thres_equal(new_margin)
+                # self.reward_model.set_teacher_thres_skip(new_margin)
+                # self.reward_model.set_teacher_thres_equal(new_margin)
 
                 # first learn reward
                 self.learn_reward(first_flag=1)

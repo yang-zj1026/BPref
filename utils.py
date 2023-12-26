@@ -19,6 +19,12 @@ from torch import distributions as pyd
 
 import datetime
 
+task_names = {
+    'walker': 'walk',
+    'cheetah': 'run',
+    'quadruped': 'walk',
+}
+
 
 def make_env(cfg):
     """Helper function to create dm_control environment"""
