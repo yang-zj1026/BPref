@@ -135,7 +135,7 @@ class RewardModelEnsemble(RewardModel):
         # data augmentation is applied to the input image x
         obs = self.apply_data_augmentation(obs)
         for reward_model in self.reward_models:
-            r_hats.append(reward_model(obs))
+            r_hats.append(reward_model(torch.from_numpy(obs).float().to(device)))
         r_hats = torch.stack(r_hats)
 
         return torch.mean(r_hats, dim=0).detach().cpu().numpy()
@@ -238,11 +238,9 @@ class RewardModelEnsemble(RewardModel):
                 self.ssl_optimizer.zero_grad()
                 # apply data augmentation
                 sa_t_1 = torch.from_numpy(sa_t_1).to(device)
-                sa_t_2 = torch.from_numpy(sa_t_2).to(device)
-                sa_t = torch.concat([sa_t_1, sa_t_2], axis=0)
                 # ssl loss and ssl acc are both list
-                ssl_losses = self.get_ssl_loss(sa_t)
-                ssl_acc = self.get_ssl_acc(sa_t)
+                ssl_losses = self.get_ssl_loss(sa_t_1)
+                ssl_acc = self.get_ssl_acc(sa_t_1)
                 for ssl_loss in ssl_losses:
                     loss += self.ssl_coeff * ssl_loss
                 print("SSL is updated, Loss: {:.4f}, ACC:{}".format(np.mean(ssl_losses.detach().cpu().numpy()),
