@@ -2,14 +2,14 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import copy
-import math
+import os
 
 import utils
 from encoder import make_encoder
 import data_augs as rad
 
 LOG_FREQ = 10000
+
 
 def compute_state_entropy(obs, full_obs, k):
     batch_size = 32
@@ -29,8 +29,6 @@ def compute_state_entropy(obs, full_obs, k):
         knn_dists = torch.kthvalue(dists, k=k + 1, dim=1).values
         state_entropy = knn_dists
     return state_entropy.unsqueeze(1)
-
-
 
 
 def gaussian_logprob(noise, log_std):
@@ -673,7 +671,8 @@ class RadSacAgent(object):
 
     def update_state_ent(self, replay_buffer, logger, step, gradient_update=1, K=5, wlogger=None):
         for index in range(gradient_update):
-            obs, state_obs, full_state_obs, action, reward, next_obs, not_done, not_done_no_max = replay_buffer.sample_state_ent(256, self.augs_funcs)
+            obs, state_obs, full_state_obs, action, reward, next_obs, not_done, not_done_no_max = replay_buffer.sample_state_ent(
+                256, self.augs_funcs)
 
             print_flag = False
             if index == gradient_update - 1:
@@ -692,14 +691,28 @@ class RadSacAgent(object):
                                      self.critic_tau)
 
     def save(self, model_dir, step):
+        if not os.path.exists(os.path.join(model_dir, str(step))):
+            os.makedirs(os.path.join(model_dir, str(step)))
         torch.save(
-            self.actor.state_dict(), '%s/actor_%s.pt' % (model_dir, step)
+            self.actor.state_dict(), '%s/%s/actor.pt' % (model_dir, step)
         )
         torch.save(
-            self.critic.state_dict(), '%s/critic_%s.pt' % (model_dir, step)
+            self.critic.state_dict(), '%s/%s/critic.pt' % (model_dir, step)
         )
         torch.save(
-            self.critic_target.state_dict(), '%s/critic_target_%s.pt' % (model_dir, step)
+            self.critic_target.state_dict(), '%s/%s/critic_target.pt' % (model_dir, step)
+        )
+        torch.save(
+            self.log_alpha, '%s/%s/log_alpha.pt' % (model_dir, step)
+        )
+        torch.save(
+            self.actor_optimizer.state_dict(), '%s/%s/actor_optimizer.pt' % (model_dir, step)
+        )
+        torch.save(
+            self.critic_optimizer.state_dict(), '%s/%s/critic_optimizer.pt' % (model_dir, step)
+        )
+        torch.save(
+            self.log_alpha_optimizer.state_dict(), '%s/%s/log_alpha_optimizer.pt' % (model_dir, step)
         )
 
     def save_curl(self, model_dir, step):

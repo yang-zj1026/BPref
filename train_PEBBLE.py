@@ -439,10 +439,12 @@ class Workspace(object):
             self.step += 1
             interact_count += 1
 
+            if self.step % 100000 == 0:
+                self.agent.save(self.work_dir, self.step)
+                self.reward_model.save_image_model(self.work_dir, self.step, self.replay_buffer)
+
         self.agent.save(self.work_dir, self.step)
-        # self.reward_model.save(self.work_dir, self.step)
         self.reward_model.save_image_model(self.work_dir, self.step, self.replay_buffer)
-        # self.replay_buffer.save(self.work_dir)
 
 
 @hydra.main(config_path='config/train_PEBBLE.yaml', strict=True)
